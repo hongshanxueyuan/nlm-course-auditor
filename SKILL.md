@@ -46,6 +46,8 @@ Each run requests the direct `GET /course/{course_id}?format=concise` route once
 
 The audit checks every vertical whose trimmed Studio name equals `赋能内容`. It checks for exactly one ImageGallery and exactly one HTML component whose trimmed name equals `本节要点`. For each discovered Gallery, it compares valid file records with `total_count`, `play_config.time_config` entries with valid file records, and audio bindings with one. The stable IDs and passing standards are listed in [CHECKLIST.md](CHECKLIST.md).
 
+Require a valid `type@vertical` locator before verifying a target. If the course tree omits a valid vertical locator, mark all five target checks `unverified`, leave the Studio link empty, and skip Gallery reads. Every target-section `issue` includes a direct Studio link to its vertical.
+
 Read errors and malformed handler responses remain `unverified`; confirmed count or component mismatches are `issue`. A local Gallery read failure marks only dependent checks `unverified`, then independent checks continue. Authentication failures receive at most four refresh attempts; an unresolved authentication failure or course-structure read failure stops the full run and adds course-level check `NLMCA-007` as `unverified`. A valid course tree with no matching vertical is a course-level `issue` (`NLMCA-006`) with target count zero and an operator hint to check the tenant, course, or naming convention. No section checks are fabricated for an empty target set.
 
 ## Artifacts and report
