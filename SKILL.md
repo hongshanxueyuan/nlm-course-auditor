@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 本 skill 对 Studio 中已保存的课程编辑状态执行只读结构筛查。它检查课程结构树和 Gallery handler 数据，不判断教学质量、事实正确性、措辞质量或媒体播放情况。
 
+领域词汇和稳定术语见 [GLOSSARY.md](references/GLOSSARY.md)。
+
 ## 运行审核
 
 1. 在审核工作目录准备 `tenant-config.json`，其中包含 `tenants` 配置对象。每个租户配置项设置 `studio_base`，也可设置 `courses_base`。配置示例见 [tenant-config.example.json](references/tenant-config.example.json)。
@@ -44,7 +46,7 @@ disable-model-invocation: true
 
 每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}?format=concise`，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能先打开已配置的课程页面以获取 Studio CSRF cookie。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
 
-审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，以及恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数，以及音频绑定数是否为 1。稳定 ID 和通过标准见 [CHECKLIST.md](CHECKLIST.md)。
+审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，以及恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数，以及音频绑定数是否为 1。稳定 ID 和通过标准见 [CHECKLIST.md](references/CHECKLIST.md)。
 
 验证目标前，必须先确认其 locator 是有效的 `type@vertical`。如果课程树中缺少有效 vertical locator，该目标的五项检查全部记为 `unverified`，Studio 链接留空，并跳过 Gallery 读取。每条目标小节 `issue` 都会包含该 vertical 的 Studio 直达链接。
 
