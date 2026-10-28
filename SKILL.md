@@ -1,18 +1,19 @@
 ---
 name: nlm-course-auditor
-description: Audit a saved Studio course for the required “赋能内容” vertical, its “本节要点” HTML component, and ImageGallery structure. Use when an operator asks to screen an NLM course without relying on its local build folder.
+description: 审核 Studio 已保存课程中的“赋能内容”小节结构和 ImageGallery 数据。
+disable-model-invocation: true
 ---
 
-# NLM Course Auditor
+# NLM 课程审核
 
-Run a read-only structural screen against Studio's saved authoring state. This checks the saved Studio course tree and Gallery handler data; it does not evaluate teaching quality, facts, wording, or media playback.
+本 skill 对 Studio 中已保存的课程编辑状态执行只读结构筛查。它检查课程结构树和 Gallery handler 数据，不判断教学质量、事实正确性、措辞质量或媒体播放情况。
 
-## Run an audit
+## 运行审核
 
-1. From the audit working directory, provide a `tenant-config.json` with a `tenants` map. Each profile has a `studio_base` and may have a `courses_base`; see [the example](references/tenant-config.example.json).
-2. Choose one course locator form:
+1. 在审核工作目录准备 `tenant-config.json`，其中包含 `tenants` 配置对象。每个租户配置项设置 `studio_base`，也可设置 `courses_base`。配置示例见 [tenant-config.example.json](references/tenant-config.example.json)。
+2. 选择一种课程定位方式。
 
-   A configured tenant profile key and full course key:
+   已配置的租户 key 和完整 course key：
 
    ```powershell
    python "<nlm-course-auditor>/scripts/nlm_course_auditor.py" `
@@ -20,38 +21,37 @@ Run a read-only structural screen against Studio's saved authoring state. This c
      --course-id 'course-v1:FIRAx+1040663+20261018'
    ```
 
-   Or a Studio course or vertical URL:
+   或使用 Studio 课程 URL / 小节 URL：
 
    ```powershell
    python "<nlm-course-auditor>/scripts/nlm_course_auditor.py" `
      --studio-url 'https://studio.example.com/course/course-v1:ORG+COURSE+RUN'
    ```
 
-   The URL form also accepts a vertical link at `/container/block-v1:...+type@vertical+block@...`. Its host and port must match exactly one configured profile; requests use that profile's `studio_base`. The tool rejects unsupported or partial URLs and inputs that combine the two locator forms before creating an authenticated client.
+   URL 输入也支持 `/container/block-v1:...+type@vertical+block@...` 小节链接。URL 的 host 和 port 必须恰好匹配一个已配置的租户配置项；请求会使用该配置项的 `studio_base`。程序会在创建认证客户端前拒绝不支持或不完整的 URL，以及同时填写两种课程定位方式的输入。
+3. 通过环境变量配置认证：
+   - 账号密码：`FIRA_SAAS_OP_ACCOUNT` 和 `FIRA_SAAS_OP_PASSWORD`。
+   - 现有会话：`FIRA_SAAS_OP_COOKIE` 和匹配的 `FIRA_SAAS_OP_CSRF_TOKEN`；Cookie 中也可包含 `csrftoken`。
 
-3. Configure authentication through environment variables:
-   - Account/password: `FIRA_SAAS_OP_ACCOUNT` and `FIRA_SAAS_OP_PASSWORD`.
-   - Existing session: `FIRA_SAAS_OP_COOKIE` and its matching `FIRA_SAAS_OP_CSRF_TOKEN`; the Cookie may contain `csrftoken`.
+   如果租户配置文件不在当前目录，使用 `--tenant-config <path>` 指定。使用 `--working-directory <path>` 选择审核产物的保存位置。凭据只通过环境变量传入，避免出现在命令历史或进程参数中。使用账号密码登录时，程序会先在已配置的 Studio host 建立会话，再读取课程树。
+4. 查看程序打印的 JSON 报告，并打开各目标小节的 `studio_url`，在 Studio 中复核。
 
-   If the tenant configuration is elsewhere, pass `--tenant-config <path>`. Use `--working-directory <path>` to choose where audit artifacts are written. Credentials are accepted from environment variables only, keeping them out of command history and process arguments. Account/password login establishes a session on the configured Studio host before the course tree read.
-4. Review the JSON report printed by the script. Open each target's `studio_url` to inspect the matching vertical in Studio.
+当程序打印报告并刷新课程专属产物时，本轮运行完成。`pass` 以外的状态都需要运营复核。输入错误会在认证前退出；课程结构读取失败或认证重试后仍未恢复时，程序会打印 `unverified` 报告并停止审核。
 
-The run is complete when the script prints a report and refreshes the per-course artifacts. A non-`pass` status needs operator review. A bad input exits before authentication; a course-structure or unresolved authentication failure prints an `unverified` report and stops the audit.
+显式输入中的 `tenant` 是 `tenants` 配置对象的 key，完整 course key 是独立的课程身份。程序不会从 course key 的组织标识推断租户。使用 URL 输入时，程序只根据 host 选择唯一匹配的租户配置项。
 
-The explicit `tenant` is a key in the configured tenant map. The complete course key is a separate identity value; the tool does not infer a tenant from its organization segment. For URL input, the configured profile is selected only by its host.
+## 只读边界和检查范围
 
-## Read-only boundary and audit coverage
+每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}?format=concise`，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能先打开已配置的课程页面以获取 Studio CSRF cookie。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
 
-Each run requests the direct `GET /course/{course_id}?format=concise` route once, saves that fresh response, and discovers targets from that same snapshot. Account/password login may first open the configured course page to establish the Studio CSRF cookie. For each Gallery, the reader calls only `get_files`, `get_play_config`, and `get_audios`, with CSRF on each POST. These handlers read saved Studio data. The request client exposes no content mutation operation.
+审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，以及恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数，以及音频绑定数是否为 1。稳定 ID 和通过标准见 [CHECKLIST.md](CHECKLIST.md)。
 
-The audit checks every vertical whose trimmed Studio name equals `赋能内容`. It checks for exactly one ImageGallery and exactly one HTML component whose trimmed name equals `本节要点`. For each discovered Gallery, it compares valid file records with `total_count`, `play_config.time_config` entries with valid file records, and audio bindings with one. The stable IDs and passing standards are listed in [CHECKLIST.md](CHECKLIST.md).
+验证目标前，必须先确认其 locator 是有效的 `type@vertical`。如果课程树中缺少有效 vertical locator，该目标的五项检查全部记为 `unverified`，Studio 链接留空，并跳过 Gallery 读取。每条目标小节 `issue` 都会包含该 vertical 的 Studio 直达链接。
 
-Require a valid `type@vertical` locator before verifying a target. If the course tree omits a valid vertical locator, mark all five target checks `unverified`, leave the Studio link empty, and skip Gallery reads. Every target-section `issue` includes a direct Studio link to its vertical.
+读取失败或 handler 响应格式无效时，结果为 `unverified`；确认的数量或组件不匹配时，结果为 `issue`。本地 Gallery 读取失败只会让依赖该读取的检查成为 `unverified`，其他独立检查会继续。认证失败最多刷新四次；认证重试后仍失败或课程结构读取失败时，整轮审核停止，并增加课程级 `NLMCA-007` `unverified`。若课程树读取成功但没有匹配的 vertical，则记录课程级 `NLMCA-006` `issue`，目标数为 0，并提示运营核对租户、课程或命名规则。目标数为 0 时不会虚构小节检查。
 
-Read errors and malformed handler responses remain `unverified`; confirmed count or component mismatches are `issue`. A local Gallery read failure marks only dependent checks `unverified`, then independent checks continue. Authentication failures receive at most four refresh attempts; an unresolved authentication failure or course-structure read failure stops the full run and adds course-level check `NLMCA-007` as `unverified`. A valid course tree with no matching vertical is a course-level `issue` (`NLMCA-006`) with target count zero and an operator hint to check the tenant, course, or naming convention. No section checks are fabricated for an empty target set.
+## 产物与报告
 
-## Artifacts and report
+程序会在工作目录下创建或覆盖 `auditor/<course-key-with-colon-replaced>/course-structure.json` 和 `report.json`。报告包含租户和课程身份、`schema_version`、审核时间、总体状态与各状态数量、课程级 `course_findings`，以及每个目标 vertical 的 Studio 直达链接和逐项检查结果。证据只保留数量、组件名称/类别、安全 locator 和经过脱敏的简短读取诊断，不包含 API payload、原始异常或服务端响应、凭据、Cookie、token、HTML 正文、媒体文件名或媒体 URL。
 
-The script creates or overwrites `auditor/<course-key-with-colon-replaced>/course-structure.json` and `report.json` under the working directory. The report contains the tenant and course identity, schema version, audit time, overall status and separate result counts, course-level findings, and each target vertical with its direct Studio link and checks. Evidence contains counts, component names/categories, safe locators, and short sanitized read diagnostics. It omits API payloads, raw exceptions or server responses, credentials, cookies, tokens, HTML bodies, media filenames and media URLs.
-
-The course snapshot is the saved structure returned by Studio and is retained separately from the redacted report. A new run fetches and overwrites the snapshot and report. If Studio cannot provide a valid new structure, the previous snapshot is removed so it cannot look current. A stopped run is restarted as a fresh audit.
+课程快照单独保存为 Studio 返回的课程结构，并与脱敏报告分开。每轮新审核都会重新读取并覆盖快照和报告。如果 Studio 无法返回有效的新结构，程序会移除旧快照，避免旧数据被误认为当前结果。中断后重新运行会从新一轮审核开始。
