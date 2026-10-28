@@ -8,17 +8,34 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, TextIO
-from urllib.parse import urlparse, urlunparse
+from typing import Any, Callable, Protocol, TextIO
+from urllib.parse import unquote, urlparse, urlunparse
 
 import requests
 
 
 COURSE_KEY_PATTERN = re.compile(r"^course-v1:[^+\s<>:\"/\\|?*\x00-\x1f]+(?:\+[^+\s<>:\"/\\|?*\x00-\x1f]+){2}$")
+SAFE_BLOCK_LOCATOR_PATTERN = re.compile(r"^block-v1:[A-Za-z0-9.+@_-]+$")
+VERTICAL_LOCATOR_PATTERN = re.compile(
+    r"^block-v1:([^+/\s]+)\+([^+/\s]+)\+([^+/\s]+)\+type@vertical\+block@([^/\s?#]+)$"
+)
 TARGET_VERTICAL_NAME = "赋能内容"
 SUMMARY_COMPONENT_NAME = "本节要点"
 REQUEST_TIMEOUT = 60
 GALLERY_READ_HANDLERS = {"get_files", "get_play_config", "get_audios"}
+MAX_AUTH_REFRESHES = 4
+AUTH_ERROR_PHRASES = (
+    "not login yet",
+    "not logged in",
+    "unauthorized",
+    "authentication required",
+    "login required",
+    "session expired",
+    "csrf token expired",
+    "csrf failed",
+    "csrf failure",
+    "invalid csrf",
+)
 
 
 class AuditError(RuntimeError):
@@ -26,11 +43,38 @@ class AuditError(RuntimeError):
 
 
 class StudioReadError(AuditError):
-    def __init__(self, stage: str, summary: str, http_status: int | None = None):
+    def __init__(
+        self,
+        stage: str,
+        summary: str,
+        http_status: int | None = None,
+        *,
+        auth_failure: bool = False,
+    ):
         super().__init__(summary)
         self.stage = stage
         self.http_status = http_status
         self.safe_summary = summary
+        self.auth_failure = auth_failure
+
+
+class GlobalAuthenticationError(StudioReadError):
+    def __init__(self, failed_stage: str, http_status: int | None):
+        super().__init__(
+            "authentication",
+            "Studio authentication could not be recovered.",
+            http_status,
+            auth_failure=True,
+        )
+        self.failed_stage = failed_stage
+        self.completed_checks: list[dict[str, Any]] = []
+
+
+class AuditAuthenticationError(AuditError):
+    def __init__(self, summary: str, http_status: int | None = None):
+        super().__init__(summary)
+        self.http_status = http_status
+        self.auth_failure = True
 
 
 class StudioReader(Protocol):
@@ -86,9 +130,15 @@ def category_of(node: dict[str, Any]) -> str:
 def locator_of(node: dict[str, Any]) -> str:
     for key in ("id", "block_location", "locator"):
         value = node.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and SAFE_BLOCK_LOCATOR_PATTERN.fullmatch(value.strip()):
             return value.strip()
     return ""
+
+
+def vertical_studio_url(studio_base: str, vertical_locator: str) -> str | None:
+    if not vertical_locator:
+        return None
+    return f"{studio_base.rstrip('/')}/container/{vertical_locator}"
 
 
 def display_name_of(node: dict[str, Any]) -> str:
@@ -109,6 +159,30 @@ def find_target_verticals(course_tree: Any) -> list[dict[str, Any]]:
 
     visit(course_tree)
     return targets
+
+
+def course_tree_is_complete(course_tree: Any) -> bool:
+    if not isinstance(course_tree, dict):
+        return False
+    root_info = course_tree.get("child_info")
+    if not isinstance(root_info, dict) or not isinstance(root_info.get("children"), list):
+        return False
+
+    container_categories = {"course", "chapter", "sequential", "vertical"}
+
+    def valid_node(node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        child_info = node.get("child_info")
+        if child_info is None and "child_info" not in node:
+            return category_of(node) not in container_categories
+        if child_info is None and category_of(node) not in container_categories:
+            return True
+        if not isinstance(child_info, dict) or not isinstance(child_info.get("children"), list):
+            return False
+        return all(valid_node(child) for child in child_info["children"])
+
+    return all(valid_node(child) for child in root_info["children"])
 
 
 def check_result(
@@ -135,6 +209,11 @@ def issue_or_pass(actual_count: int, expected_count: int) -> str:
     return "pass" if actual_count == expected_count else "issue"
 
 
+def http_status_of(error: BaseException) -> int | None:
+    status = getattr(error, "http_status", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
 def safe_file_records(payload: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
         return None, None
@@ -157,15 +236,41 @@ def safe_file_records(payload: Any) -> tuple[list[dict[str, Any]] | None, int | 
 
 
 def read_failure(stage: str, exc: BaseException) -> dict[str, Any]:
-    http_status = getattr(exc, "http_status", None)
+    http_status = http_status_of(exc)
+    summary = (
+        f"Studio {stage} read failed with HTTP {http_status}."
+        if isinstance(http_status, int)
+        else f"Studio {stage} read did not produce a verifiable response."
+    )
     evidence: dict[str, Any] = {
         "failure_stage": stage,
         "failure_category": "read_failure",
-        "summary": getattr(exc, "safe_summary", "Studio could not provide a verifiable response."),
+        "summary": summary,
     }
-    if isinstance(http_status, int):
+    if http_status is not None:
         evidence["http_status"] = http_status
     return evidence
+
+
+def authenticated_read(studio_reader: StudioReader, stage: str, operation: Any) -> Any:
+    refresh_count = 0
+    while True:
+        try:
+            return operation()
+        except Exception as exc:
+            http_status = http_status_of(exc)
+            is_auth_failure = bool(getattr(exc, "auth_failure", False)) or http_status in (401, 403)
+            if not is_auth_failure:
+                raise
+            refresh = getattr(studio_reader, "refresh_authentication", None)
+            if not callable(refresh) or refresh_count >= MAX_AUTH_REFRESHES:
+                raise GlobalAuthenticationError(stage, http_status) from exc
+            refresh_count += 1
+            try:
+                refresh()
+            except Exception as refresh_error:
+                refresh_status = http_status_of(refresh_error) or http_status
+                raise GlobalAuthenticationError(stage, refresh_status) from refresh_error
 
 
 def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[dict[str, Any]]:
@@ -174,7 +279,11 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
     total_count: int | None = None
     file_failure: dict[str, Any] | None = None
     try:
-        payload = studio_reader.get_files(gallery_locator)
+        payload = authenticated_read(
+            studio_reader,
+            "get_files",
+            lambda: studio_reader.get_files(gallery_locator),
+        )
         files, total_count = safe_file_records(payload)
         if files is None:
             file_failure = {
@@ -182,6 +291,9 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
                 "failure_category": "invalid_response",
                 "summary": "Studio get_files did not return a complete list of uniquely identified file records.",
             }
+    except GlobalAuthenticationError as exc:
+        exc.completed_checks = list(checks)
+        raise
     except Exception as exc:
         file_failure = read_failure("get_files", exc)
 
@@ -203,7 +315,11 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
         ))
 
     try:
-        config_payload = studio_reader.get_play_config(gallery_locator)
+        config_payload = authenticated_read(
+            studio_reader,
+            "get_play_config",
+            lambda: studio_reader.get_play_config(gallery_locator),
+        )
         play_config = config_payload.get("play_config") if isinstance(config_payload, dict) else None
         time_config = play_config.get("time_config") if isinstance(play_config, dict) else None
         if not isinstance(time_config, list):
@@ -214,6 +330,9 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
             }
         else:
             config_failure = None
+    except GlobalAuthenticationError as exc:
+        exc.completed_checks = list(checks)
+        raise
     except Exception as exc:
         time_config = None
         config_failure = read_failure("get_play_config", exc)
@@ -248,7 +367,11 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
         ))
 
     try:
-        audio_payload = studio_reader.get_audios(gallery_locator)
+        audio_payload = authenticated_read(
+            studio_reader,
+            "get_audios",
+            lambda: studio_reader.get_audios(gallery_locator),
+        )
         audios = audio_payload.get("audios") if isinstance(audio_payload, dict) else None
         if not isinstance(audios, list) or any(not isinstance(item, dict) for item in audios):
             audio_failure = {
@@ -258,6 +381,9 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
             }
         else:
             audio_failure = None
+    except GlobalAuthenticationError as exc:
+        exc.completed_checks = list(checks)
+        raise
     except Exception as exc:
         audios = None
         audio_failure = read_failure("get_audios", exc)
@@ -321,7 +447,11 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                 )
             ])
             continue
-        checks.extend(gallery_checks(studio_reader, gallery_locator))
+        try:
+            checks.extend(gallery_checks(studio_reader, gallery_locator))
+        except GlobalAuthenticationError as exc:
+            exc.completed_checks = checks + getattr(exc, "completed_checks", [])
+            raise
     return checks
 
 
@@ -333,6 +463,78 @@ def aggregate_status(checks: list[dict[str, Any]], course_findings: list[dict[st
     pass_count = statuses.count("pass")
     status = "issue" if issue_count else "unverified" if unverified_count else "pass"
     return status, pass_count, issue_count, unverified_count
+
+
+def make_report(
+    *,
+    tenant: str,
+    course_id: str,
+    audited_at: str | None,
+    target_sections: list[dict[str, Any]],
+    course_findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    checks = [check for section in target_sections for check in section["checks"]]
+    status, pass_count, issue_count, unverified_count = aggregate_status(checks, course_findings)
+    return {
+        "schema_version": "1.0.0",
+        "tenant": tenant,
+        "course_id": course_id,
+        "audited_at": audited_at or utc_now(),
+        "status": status,
+        "pass_count": pass_count,
+        "issue_count": issue_count,
+        "unverified_count": unverified_count,
+        "course_findings": course_findings,
+        "target_sections": target_sections,
+    }
+
+
+def write_report(
+    *,
+    tenant: str,
+    course_id: str,
+    audited_at: str | None,
+    target_sections: list[dict[str, Any]],
+    course_findings: list[dict[str, Any]],
+    output_dir: Path,
+    output: TextIO | None,
+) -> dict[str, Any]:
+    report = make_report(
+        tenant=tenant,
+        course_id=course_id,
+        audited_at=audited_at,
+        target_sections=target_sections,
+        course_findings=course_findings,
+    )
+    atomic_write_json(output_dir / "report.json", report)
+    print(json.dumps(report, ensure_ascii=False, indent=2), file=output or sys.stdout)
+    return report
+
+
+def stopped_finding(stage: str, category: str, http_status: int | None = None) -> dict[str, Any]:
+    if not isinstance(http_status, int) or isinstance(http_status, bool):
+        http_status = None
+    summary = (
+        f"Studio {stage} read failed with HTTP {http_status}."
+        if isinstance(http_status, int)
+        else f"Studio {stage} could not be verified."
+    )
+    evidence: dict[str, Any] = {
+        "failure_stage": stage,
+        "failure_category": category,
+        "summary": summary,
+    }
+    if isinstance(http_status, int):
+        evidence["http_status"] = http_status
+    return {
+        "check_id": "NLMCA-007",
+        "category": "课程读取",
+        "name": "课程审核读取完成",
+        "status": "unverified",
+        "expected": {"audit_reads": "complete"},
+        "actual": {"audit_reads": "stopped"},
+        "evidence": evidence,
+    }
 
 
 def audit_course(
@@ -348,26 +550,82 @@ def audit_course(
     if not isinstance(tenant, str) or not tenant.strip():
         raise AuditError("Provide a configured tenant profile name.")
     validate_course_key(course_id)
-    course_tree = studio_reader.get_course_structure(course_id)
-    if not isinstance(course_tree, dict):
-        raise AuditError("Studio returned an invalid course-structure response.")
-
     safe_course_id = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", course_id).rstrip(" .")
     output_dir = Path(working_directory) / "auditor" / safe_course_id
+    snapshot_path = output_dir / "course-structure.json"
+    snapshot_path.unlink(missing_ok=True)
+    try:
+        course_tree = authenticated_read(
+            studio_reader,
+            "course_structure",
+            lambda: studio_reader.get_course_structure(course_id),
+        )
+    except GlobalAuthenticationError as exc:
+        finding = stopped_finding("authentication", "authentication_failure", exc.http_status)
+        return write_report(
+            tenant=tenant,
+            course_id=course_id,
+            audited_at=audited_at,
+            target_sections=[],
+            course_findings=[finding],
+            output_dir=output_dir,
+            output=output,
+        )
+    except Exception as exc:
+        finding = stopped_finding("course_structure", "read_failure", http_status_of(exc))
+        return write_report(
+            tenant=tenant,
+            course_id=course_id,
+            audited_at=audited_at,
+            target_sections=[],
+            course_findings=[finding],
+            output_dir=output_dir,
+            output=output,
+        )
+    if not course_tree_is_complete(course_tree):
+        finding = stopped_finding("course_structure", "invalid_response")
+        return write_report(
+            tenant=tenant,
+            course_id=course_id,
+            audited_at=audited_at,
+            target_sections=[],
+            course_findings=[finding],
+            output_dir=output_dir,
+            output=output,
+        )
     atomic_write_json(output_dir / "course-structure.json", course_tree)
 
     target_sections: list[dict[str, Any]] = []
-    all_checks: list[dict[str, Any]] = []
     for vertical in find_target_verticals(course_tree):
-        checks = section_checks(studio_reader, vertical)
+        try:
+            checks = section_checks(studio_reader, vertical)
+        except GlobalAuthenticationError as exc:
+            partial_checks = getattr(exc, "completed_checks", [])
+            if partial_checks:
+                vertical_locator = locator_of(vertical)
+                target_sections.append({
+                    "name": display_name_of(vertical),
+                    "locator": vertical_locator,
+                    "studio_url": vertical_studio_url(studio_reader.studio_base, vertical_locator),
+                    "checks": partial_checks,
+                })
+            course_findings = [stopped_finding("authentication", "authentication_failure", exc.http_status)]
+            return write_report(
+                tenant=tenant,
+                course_id=course_id,
+                audited_at=audited_at,
+                target_sections=target_sections,
+                course_findings=course_findings,
+                output_dir=output_dir,
+                output=output,
+            )
         section = {
             "name": display_name_of(vertical),
             "locator": locator_of(vertical),
-            "studio_url": f"{studio_reader.studio_base.rstrip('/')}/container/{locator_of(vertical)}",
+            "studio_url": vertical_studio_url(studio_reader.studio_base, locator_of(vertical)),
             "checks": checks,
         }
         target_sections.append(section)
-        all_checks.extend(checks)
 
     course_findings: list[dict[str, Any]] = []
     if not target_sections:
@@ -375,32 +633,25 @@ def audit_course(
             "check_id": "NLMCA-006",
             "category": "课程范围",
             "name": "课程结构中找到赋能内容目标小节",
-            "status": "unverified",
+            "status": "issue",
             "expected": {"target_section_count": "at least 1"},
             "actual": {"target_section_count": 0},
             "evidence": {
                 "failure_stage": "target_discovery",
-                "failure_category": "no_target_sections",
+                "failure_category": "empty_target_set",
                 "summary": "No matching target vertical was found; confirm the tenant, course, and Studio naming.",
             },
         })
 
-    status, pass_count, issue_count, unverified_count = aggregate_status(all_checks, course_findings)
-    report = {
-        "schema_version": "1.0.0",
-        "tenant": tenant,
-        "course_id": course_id,
-        "audited_at": audited_at or utc_now(),
-        "status": status,
-        "pass_count": pass_count,
-        "issue_count": issue_count,
-        "unverified_count": unverified_count,
-        "course_findings": course_findings,
-        "target_sections": target_sections,
-    }
-    atomic_write_json(output_dir / "report.json", report)
-    print(json.dumps(report, ensure_ascii=False, indent=2), file=output or sys.stdout)
-    return report
+    return write_report(
+        tenant=tenant,
+        course_id=course_id,
+        audited_at=audited_at,
+        target_sections=target_sections,
+        course_findings=course_findings,
+        output_dir=output_dir,
+        output=output,
+    )
 
 
 def parse_cookie_header(cookie_header: str) -> dict[str, str]:
@@ -412,6 +663,40 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
             if name.strip():
                 cookies[name.strip()] = value.strip()
     return cookies
+
+
+def url_host_key(value: str) -> tuple[str, int | None]:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AuditError("Studio URLs must use an HTTP(S) host configured in tenant profiles.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise AuditError("Studio URL has an invalid port.") from exc
+    if port == (443 if parsed.scheme == "https" else 80):
+        port = None
+    return parsed.hostname.casefold().rstrip("."), port
+
+
+def parse_studio_course_url(studio_url: str) -> tuple[tuple[str, int], str]:
+    if not isinstance(studio_url, str) or not studio_url.strip():
+        raise AuditError("Provide a Studio course or vertical URL.")
+    parsed = urlparse(studio_url.strip())
+    if parsed.username or parsed.password:
+        raise AuditError("Studio URLs cannot contain embedded credentials.")
+    host = url_host_key(studio_url.strip())
+    segments = [unquote(part) for part in parsed.path.split("/") if part]
+    if len(segments) == 2 and segments[0] == "course":
+        course_id = segments[1]
+    elif len(segments) == 2 and segments[0] == "container":
+        match = VERTICAL_LOCATOR_PATTERN.fullmatch(segments[1])
+        if not match:
+            raise AuditError("Studio section URLs must identify a vertical block.")
+        course_id = "course-v1:" + "+".join(match.groups()[:3])
+    else:
+        raise AuditError("Use a Studio /course/course-v1:... or /container/block-v1:... vertical URL.")
+    validate_course_key(course_id)
+    return host, course_id
 
 
 def derive_courses_base(studio_base: str) -> str:
@@ -436,16 +721,36 @@ class StudioApiReader:
         *,
         studio_base: str,
         courses_base: str,
+        course_id: str,
         environ: dict[str, str] | None = None,
+        session_factory: Callable[[], Any] | None = None,
     ):
         self.studio_base = studio_base.rstrip("/")
         self.host = urlparse(self.studio_base).hostname or ""
+        self.course_id = course_id
         self.environ = os.environ if environ is None else environ
-        self.session = requests.Session()
+        self.courses_base = courses_base.rstrip("/")
+        self.session_factory = session_factory or requests.Session
+        self.session: Any
+        self.csrf_token = ""
+        self._new_session()
+        self._authenticate()
+
+    def _new_session(self) -> None:
+        self.session = self.session_factory()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json, text/javascript, */*; q=0.01",
         })
+
+    def _csrf_cookie(self) -> str:
+        for cookie in self.session.cookies:
+            domain = str(getattr(cookie, "domain", "")).lstrip(".").casefold()
+            if cookie.name == "csrftoken" and (domain == self.host.casefold() or self.host.casefold().endswith("." + domain)):
+                return cookie.value
+        return ""
+
+    def _authenticate(self) -> None:
         self.csrf_token = self.environ.get("FIRA_SAAS_OP_CSRF_TOKEN", "").strip()
         cookie_header = self.environ.get("FIRA_SAAS_OP_COOKIE", "").strip()
         cookies = parse_cookie_header(cookie_header)
@@ -453,69 +758,112 @@ class StudioApiReader:
             self.session.cookies.set(key, value, domain=self.host)
         if not self.csrf_token:
             self.csrf_token = cookies.get("csrftoken", "")
-
+        if cookies:
+            if not self.csrf_token:
+                raise AuditAuthenticationError("Configure a matching CSRF token with the Studio Cookie.")
+            return
         account = self.environ.get("FIRA_SAAS_OP_ACCOUNT", "").strip()
         password = self.environ.get("FIRA_SAAS_OP_PASSWORD", "").strip()
-        if cookies:
-            return
         if account or password:
             if not account or not password:
-                raise AuditError("Configure both FIRA_SAAS_OP_ACCOUNT and FIRA_SAAS_OP_PASSWORD.")
-            self._login(account, password, courses_base)
+                raise AuditAuthenticationError("Configure both FIRA_SAAS_OP_ACCOUNT and FIRA_SAAS_OP_PASSWORD.")
+            self._login(account, password)
             return
-        raise AuditError(
+        raise AuditAuthenticationError(
             "Authentication is required. Configure FIRA_SAAS_OP_ACCOUNT and FIRA_SAAS_OP_PASSWORD, "
             "or FIRA_SAAS_OP_COOKIE with FIRA_SAAS_OP_CSRF_TOKEN."
         )
 
-    def _login(self, account: str, password: str, courses_base: str) -> None:
+    def refresh_authentication(self) -> None:
+        self._new_session()
+        self._authenticate()
+
+    def _login(self, account: str, password: str) -> None:
         try:
             response = self.session.post(
-                f"{courses_base.rstrip('/')}/openapi/v1/auth/login/",
+                f"{self.courses_base}/openapi/v1/auth/login/",
                 data={"account": account, "password": password},
                 timeout=30,
+                allow_redirects=False,
             )
-            if int(getattr(response, "status_code", 200)) >= 400:
-                raise StudioReadError("authentication", "Studio login failed.", int(response.status_code))
+            status = int(getattr(response, "status_code", 200))
+            if status >= 300:
+                raise AuditAuthenticationError("Studio login failed.", status)
             payload = response.json()
-        except StudioReadError:
+        except AuditAuthenticationError:
             raise
-        except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
-            raise StudioReadError("authentication", "Studio login failed.") from exc
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise AuditAuthenticationError("Studio login could not be completed.", status) from exc
         jwt = payload.get("meta", {}).get("jwt") if isinstance(payload, dict) else None
         if not isinstance(jwt, str) or not jwt:
-            raise StudioReadError("authentication", "Studio login did not return an authenticated session.")
+            raise AuditAuthenticationError("Studio login did not return an authenticated session.")
         self.session.headers["Authorization"] = f"Bearer {jwt}"
+        try:
+            response = self.session.get(
+                f"{self.studio_base}/course/{self.course_id}",
+                headers={"Accept": "text/html,*/*"},
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+            )
+            status = int(getattr(response, "status_code", 200))
+            if status >= 300:
+                raise AuditAuthenticationError("Studio session could not be established.", status)
+        except AuditAuthenticationError:
+            raise
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            raise AuditAuthenticationError("Studio session could not be established.", status) from exc
+        self.csrf_token = self.environ.get("FIRA_SAAS_OP_CSRF_TOKEN", "").strip() or self._csrf_cookie()
+        if not self.csrf_token:
+            raise AuditAuthenticationError("Studio session did not provide a CSRF token.")
 
     def _json_response(self, response: Any, stage: str) -> Any:
         status = int(getattr(response, "status_code", 200))
-        if status >= 400:
-            raise StudioReadError(stage, f"Studio read failed with HTTP {status}.", status)
+        if status >= 400 or 300 <= status < 400:
+            raise StudioReadError(
+                stage,
+                f"Studio {stage} read failed with HTTP {status}.",
+                status,
+                auth_failure=300 <= status < 400 or status in {401, 403},
+            )
         try:
-            return response.json()
+            payload = response.json()
         except (ValueError, json.JSONDecodeError) as exc:
             raise StudioReadError(stage, "Studio returned invalid JSON.", status) from exc
+        if isinstance(payload, dict):
+            auth_messages = [payload.get(key) for key in ("error", "error_message", "message", "msg")]
+            if any(
+                isinstance(message, str)
+                and any(phrase in message.casefold() for phrase in AUTH_ERROR_PHRASES)
+                for message in auth_messages
+            ):
+                raise StudioReadError(
+                    stage,
+                    "Studio authentication was rejected.",
+                    status,
+                    auth_failure=True,
+                )
+        return payload
 
     def _csrf(self) -> str:
         if self.csrf_token:
             return self.csrf_token
-        for cookie in self.session.cookies:
-            if cookie.name == "csrftoken" and self.host in (cookie.domain or ""):
-                self.csrf_token = cookie.value
-                return self.csrf_token
-        for cookie in self.session.cookies:
-            if cookie.name == "csrftoken":
-                self.csrf_token = cookie.value
-                return self.csrf_token
-        raise AuditError("The authenticated Studio session has no CSRF token for Gallery read handlers.")
+        self.csrf_token = self._csrf_cookie()
+        if self.csrf_token:
+            return self.csrf_token
+        raise AuditAuthenticationError("The authenticated Studio session has no CSRF token for Gallery read handlers.")
 
     def get_course_structure(self, course_id: str) -> Any:
+        if course_id != self.course_id:
+            raise AuditError("The Studio reader course does not match the validated course key.")
         try:
             response = self.session.get(
                 f"{self.studio_base}/course/{course_id}",
                 params={"format": "concise"},
                 headers={"Accept": "application/json, text/plain, */*"},
                 timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise StudioReadError("course_structure", "Studio course structure could not be read.") from exc
@@ -538,6 +886,7 @@ class StudioApiReader:
                     "Referer": f"{self.studio_base}/container/{gallery_locator}",
                 },
                 timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
             )
         except StudioReadError:
             raise
@@ -555,15 +904,7 @@ class StudioApiReader:
         return self._post_gallery_read(gallery_locator, "get_audios", {})
 
 
-def load_tenant(tenant: str, config_path: Path) -> tuple[str, str]:
-    if not config_path.is_file():
-        raise AuditError(f"Tenant configuration file was not found: {config_path}")
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise AuditError("Tenant configuration file is not valid JSON.") from exc
-    tenants = config.get("tenants") if isinstance(config, dict) else None
-    profile = tenants.get(tenant) if isinstance(tenants, dict) else None
+def validated_tenant_profile(tenant: str, profile: Any) -> tuple[str, str]:
     if not isinstance(profile, dict):
         raise AuditError(f"Tenant profile '{tenant}' is not configured.")
     studio_base = profile.get("studio_base")
@@ -571,22 +912,143 @@ def load_tenant(tenant: str, config_path: Path) -> tuple[str, str]:
     if not isinstance(studio_base, str) or not studio_base.strip():
         raise AuditError(f"Tenant profile '{tenant}' has no studio_base.")
     parsed = urlparse(studio_base)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
         raise AuditError(f"Tenant profile '{tenant}' has an invalid studio_base.")
+    url_host_key(studio_base)
     if courses_base is None or courses_base == "":
         courses_base = derive_courses_base(studio_base)
     if not isinstance(courses_base, str):
         raise AuditError(f"Tenant profile '{tenant}' has an invalid courses_base.")
     courses_parsed = urlparse(courses_base)
-    if courses_parsed.scheme not in {"http", "https"} or not courses_parsed.hostname or courses_parsed.username or courses_parsed.password:
+    if (
+        courses_parsed.scheme not in {"http", "https"}
+        or not courses_parsed.hostname
+        or courses_parsed.username
+        or courses_parsed.password
+        or courses_parsed.path not in {"", "/"}
+        or courses_parsed.query
+        or courses_parsed.fragment
+    ):
         raise AuditError(f"Tenant profile '{tenant}' has an invalid courses_base.")
+    url_host_key(courses_base)
     return studio_base.rstrip("/"), courses_base.rstrip("/")
+
+
+def read_tenants(config_path: Path) -> dict[str, Any]:
+    if not config_path.is_file():
+        raise AuditError(f"Tenant configuration file was not found: {config_path}")
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise AuditError("Tenant configuration file is not valid JSON.") from exc
+    tenants = config.get("tenants") if isinstance(config, dict) else None
+    if not isinstance(tenants, dict) or not tenants:
+        raise AuditError("Tenant configuration must contain a non-empty tenants map.")
+    return tenants
+
+
+def load_tenant(tenant: str, config_path: Path) -> tuple[str, str]:
+    tenants = read_tenants(config_path)
+    return validated_tenant_profile(tenant, tenants.get(tenant))
+
+
+def resolve_audit_input(
+    *,
+    tenant: str | None,
+    course_id: str | None,
+    studio_url: str | None,
+    tenant_config_path: Path,
+) -> tuple[str, str, str, str]:
+    has_explicit_input = tenant is not None or course_id is not None
+    if studio_url is not None:
+        if has_explicit_input:
+            raise AuditError("Choose either tenant/course key or one Studio URL input.")
+        host_key, resolved_course_id = parse_studio_course_url(studio_url)
+        tenants = read_tenants(tenant_config_path)
+        matches: list[tuple[str, str, str]] = []
+        for profile_name, profile in tenants.items():
+            studio_base, courses_base = validated_tenant_profile(str(profile_name), profile)
+            if url_host_key(studio_base) == host_key:
+                matches.append((str(profile_name), studio_base, courses_base))
+        if not matches:
+            raise AuditError("Studio URL host does not match a configured tenant profile.")
+        if len(matches) != 1:
+            raise AuditError("Studio URL host maps to more than one tenant profile.")
+        resolved_tenant, studio_base, courses_base = matches[0]
+        return resolved_tenant, resolved_course_id, studio_base, courses_base
+
+    if tenant is None or course_id is None:
+        raise AuditError("Provide both --tenant and a complete --course-id, or use --studio-url.")
+    if not isinstance(tenant, str) or not tenant.strip():
+        raise AuditError("Provide a configured tenant profile name.")
+    validate_course_key(course_id)
+    studio_base, courses_base = load_tenant(tenant, tenant_config_path)
+    return tenant, course_id, studio_base, courses_base
+
+
+def run_audit_request(
+    *,
+    working_directory: str | Path,
+    tenant_config_path: str | Path = "tenant-config.json",
+    tenant: str | None = None,
+    course_id: str | None = None,
+    studio_url: str | None = None,
+    reader_factory: Callable[..., StudioReader] | None = None,
+    environ: dict[str, str] | None = None,
+    audited_at: str | None = None,
+    output: TextIO | None = None,
+) -> dict[str, Any]:
+    resolved_tenant, resolved_course_id, studio_base, courses_base = resolve_audit_input(
+        tenant=tenant,
+        course_id=course_id,
+        studio_url=studio_url,
+        tenant_config_path=Path(tenant_config_path).expanduser().resolve(),
+    )
+    factory = reader_factory or StudioApiReader
+    output_dir = Path(working_directory) / "auditor" / resolved_course_id.replace(":", "_")
+    snapshot_path = output_dir / "course-structure.json"
+    try:
+        reader = factory(
+            studio_base=studio_base,
+            courses_base=courses_base,
+            course_id=resolved_course_id,
+            environ=environ,
+        )
+    except AuditAuthenticationError as exc:
+        snapshot_path.unlink(missing_ok=True)
+        finding = stopped_finding("authentication", "authentication_failure", exc.http_status)
+        return write_report(
+            tenant=resolved_tenant,
+            course_id=resolved_course_id,
+            audited_at=audited_at,
+            target_sections=[],
+            course_findings=[finding],
+            output_dir=output_dir,
+            output=output,
+        )
+    return audit_course(
+        tenant=resolved_tenant,
+        course_id=resolved_course_id,
+        studio_reader=reader,
+        working_directory=working_directory,
+        audited_at=audited_at,
+        output=output,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only structural audit of a saved Studio course")
-    parser.add_argument("--tenant", required=True, help="configured tenant profile key")
-    parser.add_argument("--course-id", required=True, help="complete course-v1:ORG+COURSE+RUN key")
+    parser.add_argument("--tenant", help="configured tenant profile key")
+    parser.add_argument("--course-id", help="complete course-v1:ORG+COURSE+RUN key")
+    parser.add_argument("--studio-url", help="Studio course URL or vertical container URL")
     parser.add_argument("--tenant-config", default="tenant-config.json", help="tenant base URL configuration JSON")
     parser.add_argument("--working-directory", default=".", help="directory under which audit artifacts are saved")
     return parser.parse_args(argv)
@@ -595,13 +1057,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
-        validate_course_key(args.course_id)
-        studio_base, courses_base = load_tenant(args.tenant, Path(args.tenant_config).expanduser().resolve())
-        reader = StudioApiReader(studio_base=studio_base, courses_base=courses_base)
-        report = audit_course(
+        report = run_audit_request(
             tenant=args.tenant,
             course_id=args.course_id,
-            studio_reader=reader,
+            studio_url=args.studio_url,
+            tenant_config_path=Path(args.tenant_config).expanduser().resolve(),
             working_directory=Path(args.working_directory).expanduser().resolve(),
         )
         return 0 if report["status"] == "pass" else 1
