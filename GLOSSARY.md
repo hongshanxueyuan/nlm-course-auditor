@@ -1,0 +1,23 @@
+# 领域词汇
+
+- **审核目标（Audit Target）**：本次审核读取并检查的课程状态。V1 检查 Studio 中已保存的编辑版本，包括已保存但尚未发布的修改；不包括浏览器中尚未保存的编辑，也不等于 LMS 学员端的已发布版本。
+- **租户（Tenant）**：运营选择的 Studio 环境身份，用于确定允许访问的 Studio host；它与 course key 中的组织标识相互独立。URL 快捷输入必须映射到唯一已配置租户。
+- **课程定位符（Course Locator）**：用于标识审核目标课程的值。校验运营提供 tenant profile 与完整 `course-v1:...` course key，或使用能明确解析为这两项、且 host 匹配唯一配置 profile 的 Studio 课程/小节 URL；不接受短课程编号或无法明确解析的 URL。
+- **目标小节（Audit Unit）**：V1 从整门课程中定位 Studio 名称去除首尾空格后完整匹配“赋能内容”的 vertical。每个这样的 vertical 是一个筛查目标，必须恰有一个 ImageGallery 和恰有一个 Studio 名称去除首尾空格后完整匹配“本节要点”的 HTML 组件；不接受部分匹配。
+- **审核类目（Audit Category）**：用于把相关审核检查项归组的类目，例如 ImageGallery 或 HTML 要点检查。
+- **检查项（Audit Check）**：一条独立的审核规则，有稳定标识、名称、目标范围、检查内容和通过标准。
+- **检查清单（Audit Checklist）**：供校验运营查看的类目化检查项目录，说明每项检查的适用范围和通过标准。
+- **结构检查（Structural Check）**：在 Studio 已保存的课程状态中检查组件、名称和内部一致性等可客观判定的条件。V1 的自动筛查以此为范围。
+- **只读审核（Read-Only Audit）**：读取 Studio 已保存的课程状态并报告结果，不改变课程内容；HTTP 请求方法本身不决定操作是否只读。
+- **语义内容审核（Semantic Content Review）**：判断课件内容的事实准确性、教学质量或表达效果。V1 由校验运营人工复核，不由自动检查项判断。
+- **检查结果（Check Result）**：单条审核检查的结果，状态为 pass、issue 或 unverified。
+- **课程审核状态（Course Audit Status）**：按整课所有检查项和课程级结果归并；有 issue 时为 issue，否则有 unverified 时为 unverified，只有全部通过时为 pass。状态数量分别保留。
+- **issue**：证据充分且明确违反某项结构检查规则，或课程级审核范围不符合预期；例如完整读取课程后未找到任何目标小节。
+- **unverified**：读取失败、响应无效或证据不足，无法判断检查规则是否通过。
+- **课程结构快照（Course Snapshot）**：一次审查读取到的 Studio 课程结构；同一轮检查共用该快照，新一轮审查重新获取。
+- **审核报告（Audit Report）**：按课程汇总整课状态、课程级结果、目标小节及其逐项检查结果、证据与 Studio 定位链接，供校验运营复核。
+- **运行进度（Run Progress）**：一次审核执行到哪一步及能否恢复执行的状态；与检查项本身分开建模。V1 不保存逐项续跑进度，中断后重新开始一轮审查。
+- **参照基线（Reference Baseline）**：判断课程内容在语义上是否正确时所依据的材料。V1 不自动评判语义内容，因此不要求语义审核参照基线。
+- **做课运营（Course Builder）**：创建或维护课程的人。
+- **校验运营（Audit Operator）**：运行本 skill 的人，可能与做课运营不同。
+- **首轮筛查（First-pass Screening）**：用明确检查项暴露课程问题，交由校验运营人工复核；它不替代后续人工审核。
