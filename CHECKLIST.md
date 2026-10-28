@@ -19,8 +19,9 @@ These checks describe objective structure in the saved Studio authoring state. T
 
 ## Course scope
 
-| ID | Finding | Scope | Rule | Result |
+| ID | Finding | Scope | Rule | Outcome |
 | --- | --- | --- | --- | --- |
-| NLMCA-006 | Target vertical discovery | One course per run | Search the fresh full-course tree for a vertical whose trimmed name is exactly `赋能内容` | Zero matches produce one course-level `unverified` finding and no fabricated section checks |
+| NLMCA-006 | Target vertical discovery | One course per run | Search the fresh full-course tree for a vertical whose trimmed name is exactly `赋能内容` | Zero matches produce one course-level `issue` with target count zero and a tenant/course/name hint; no fabricated section checks |
+| NLMCA-007 | Full course audit read | One course per run | Stop after an invalid/unreadable course tree or unresolved authentication after at most four refreshes | Record one course-level `unverified` finding; never present a stopped run as `pass` |
 
-Each finding is `pass`, `issue`, or `unverified`. A confirmed rule violation is an issue; missing or malformed evidence is unverified. The overall course status prioritizes `issue`, then `unverified`, and is `pass` only if all results pass.
+Each result is `pass`, `issue`, or `unverified`. A confirmed rule violation is an issue; missing or malformed evidence is unverified. Local Gallery read failures affect their dependent checks while independent checks continue. The overall course status prioritizes `issue`, then `unverified`, and is `pass` only if all results pass. Reports include only sanitized failure stage/category, available HTTP status, and a short safe summary.
