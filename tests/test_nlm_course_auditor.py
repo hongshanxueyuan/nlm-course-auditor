@@ -327,6 +327,33 @@ def test_missing_required_components_are_reported_as_issues(tmp_path):
     assert reader.calls == [("get_course_structure", COURSE_KEY)]
 
 
+def test_target_without_a_vertical_link_cannot_produce_section_issues(tmp_path):
+    tree = course_tree_with_one_target()
+    chapter = tree["child_info"]["children"][0]
+    sequential = chapter["child_info"]["children"][0]
+    vertical = sequential["child_info"]["children"][0]
+    gallery = vertical["child_info"]["children"][0]
+    vertical["id"] = "block-v1:FIRAx+1040663+20261018+type@chapter+block@not-a-vertical"
+    vertical["child_info"]["children"] = [gallery]
+    reader = FakeStudioReader(course_tree=tree)
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    section = report["target_sections"][0]
+    assert section["studio_url"] is None
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 5
+    assert report["status"] == "unverified"
+    assert report["issue_count"] == 0
+    assert report["unverified_count"] == 5
+    assert reader.calls == [("get_course_structure", COURSE_KEY)]
+
+
 def test_course_with_no_target_verticals_is_a_course_level_issue(tmp_path):
     reader = FakeStudioReader(course_tree={"id": COURSE_KEY, "category": "course", "child_info": {"children": []}})
 
@@ -478,7 +505,7 @@ def test_untrusted_block_locator_values_are_omitted_from_report_links(tmp_path):
     section = report["target_sections"][0]
     assert section["locator"] == ""
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["pass", "pass", "unverified", "unverified", "unverified"]
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 5
     report_text = json.dumps(report, ensure_ascii=False)
     assert private_locator not in report_text
     assert "locator-secret" not in report_text

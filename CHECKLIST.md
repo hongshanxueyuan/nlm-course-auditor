@@ -9,6 +9,8 @@ These checks describe objective structure in the saved Studio authoring state. T
 | NLMCA-001 | Target vertical has one ImageGallery | Each vertical named `赋能内容` after trimming | Count direct child components with category `imagesgallery` | Exactly one |
 | NLMCA-002 | Target vertical has one “本节要点” HTML component | Each vertical named `赋能内容` after trimming | Count direct child components with category `html` and trimmed name `本节要点` | Exactly one |
 
+All target checks require a valid `type@vertical` locator. If it is missing, keep all five target checks `unverified`, leave the Studio link empty, and skip Gallery reads; each target-section `issue` includes a direct vertical link.
+
 ## ImageGallery data
 
 | ID | Check | Scope | Rule | Pass standard |
