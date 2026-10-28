@@ -1,0 +1,8 @@
+{
+  "tenants": {
+    "uat": {
+      "studio_base": "https://studio.uat.example.com",
+      "courses_base": "https://courses.uat.example.com"
+    }
+  }
+}
