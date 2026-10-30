@@ -8,8 +8,12 @@
 | --- | --- | --- | --- | --- |
 | NLMCA-001 | 目标小节恰有一个 ImageGallery | 名称去掉首尾空格后等于 `赋能内容` 的每个 vertical | 统计其直接子组件中 `category` 为 `imagesgallery` 的组件数 | 数量恰为 1 |
 | NLMCA-002 | 目标小节恰有一个“本节要点” HTML 组件 | 名称去掉首尾空格后等于 `赋能内容` 的每个 vertical | 统计直接子组件中 `category` 为 `html` 且名称去掉首尾空格后等于 `本节要点` 的组件数 | 数量恰为 1 |
+| NLMCA-008 | ImageGallery 位于第一个直接子组件 | 每个目标 vertical | 检查直接子组件列表首项的 `category` 是否为 `imagesgallery` | 第一个直接子组件是 ImageGallery |
+| NLMCA-009 | “本节要点”位于最后一个直接子组件 | 每个目标 vertical | 检查直接子组件列表末项的 `category` 是否为 `html` 且名称去掉首尾空格后等于 `本节要点` | 最后一个直接子组件是“本节要点” HTML |
 
-所有目标检查都要求有效的 `type@vertical` locator。如果 locator 缺失，五项目标检查全部记为 `unverified`，Studio 链接留空，并跳过 Gallery 读取；每条目标小节 `issue` 都包含 vertical 直达链接。
+位置检查独立于数量检查：ImageGallery 或“本节要点”缺失、重复时，NLMCA-001/002 报告数量问题，NLMCA-008/009 仍按首末直接子组件判定。直接子组件列表为空时，两项位置检查均为 `issue`。更深层的后代组件不计入直接子组件。
+
+所有目标检查都要求有效的 `type@vertical` locator。如果 locator 缺失，该目标的检查记为 `unverified`，Studio 链接留空，并跳过 Gallery 读取；每条目标小节结构问题都包含 vertical 直达链接。
 
 ## ImageGallery 数据
 

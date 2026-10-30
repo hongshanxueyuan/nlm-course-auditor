@@ -91,6 +91,25 @@ def display_name_of(node: dict[str, Any]) -> str:
     return value if isinstance(value, str) else ""
 
 
+def child_position_record(node: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "position": index + 1,
+        "category": category_of(node),
+        "name": display_name_of(node).strip(),
+    }
+
+
+def component_positions(
+    children: list[dict[str, Any]], *, category: str, name: str | None = None,
+) -> list[int]:
+    return [
+        index + 1
+        for index, child in enumerate(children)
+        if category_of(child) == category
+        and (name is None or display_name_of(child).strip() == name)
+    ]
+
+
 def find_target_verticals(course_tree: Any) -> list[dict[str, Any]]:
     if not isinstance(course_tree, dict):
         raise AuditError("Studio returned an invalid course-structure response.")
@@ -375,6 +394,8 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                 ("NLMCA-003", "ImageGallery", "Gallery file count matches total_count", "Valid file-record count equals Studio total_count"),
                 ("NLMCA-004", "ImageGallery", "Timing-entry count matches valid files", {"time_config_count_equals_valid_file_count": True}),
                 ("NLMCA-005", "ImageGallery", "Gallery has exactly one audio binding", {"audio_binding_count": 1}),
+                ("NLMCA-008", "组件顺序", "ImageGallery 位于目标小节首位", {"first_child_category": "imagesgallery"}),
+                ("NLMCA-009", "组件顺序", "“本节要点”位于目标小节末尾", {"last_child_category": "html", "last_child_name": SUMMARY_COMPONENT_NAME}),
             )
         ]
     children = children_of(vertical)
@@ -396,10 +417,49 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
             {"vertical_locator": vertical_locator, "component_category": "html", "name": SUMMARY_COMPONENT_NAME},
         ),
     ]
+    first_child = child_position_record(children[0], 0) if children else None
+    last_child = child_position_record(children[-1], len(children) - 1) if children else None
+    gallery_positions = component_positions(children, category="imagesgallery")
+    summary_positions = component_positions(children, category="html", name=SUMMARY_COMPONENT_NAME)
+    order_checks = [
+        check_result(
+            "NLMCA-008", "组件顺序", "ImageGallery 位于目标小节首位",
+            "pass" if first_child is not None and first_child["category"] == "imagesgallery" else "issue",
+            {"first_child_category": "imagesgallery"},
+            {
+                "direct_child_count": len(children),
+                "imagesgallery_positions": gallery_positions,
+                "first_child": first_child,
+            },
+            {
+                "vertical_locator": vertical_locator,
+                "direct_child_count": len(children),
+                "imagesgallery_positions": gallery_positions,
+                "first_child": first_child,
+            },
+        ),
+        check_result(
+            "NLMCA-009", "组件顺序", "“本节要点”位于目标小节末尾",
+            "pass" if last_child is not None and last_child["category"] == "html" and last_child["name"] == SUMMARY_COMPONENT_NAME else "issue",
+            {"last_child_category": "html", "last_child_name": SUMMARY_COMPONENT_NAME},
+            {
+                "direct_child_count": len(children),
+                "summary_positions": summary_positions,
+                "last_child": last_child,
+            },
+            {
+                "vertical_locator": vertical_locator,
+                "direct_child_count": len(children),
+                "summary_positions": summary_positions,
+                "last_child": last_child,
+            },
+        ),
+    ]
+    gallery_data_checks: list[dict[str, Any]] = []
     for gallery in galleries:
         gallery_locator = locator_of(gallery)
         if not gallery_locator:
-            checks.extend([
+            gallery_data_checks.extend([
                 check_result(
                     check_id, "ImageGallery", name, "unverified", expected, None,
                     {
@@ -417,11 +477,16 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
             ])
             continue
         try:
-            checks.extend(gallery_checks(studio_reader, gallery_locator))
+            gallery_data_checks.extend(gallery_checks(studio_reader, gallery_locator))
         except GlobalAuthenticationError as exc:
-            exc.completed_checks = checks + getattr(exc, "completed_checks", [])
+            exc.completed_checks = (
+                checks
+                + gallery_data_checks
+                + getattr(exc, "completed_checks", [])
+                + order_checks
+            )
             raise
-    return checks
+    return checks + gallery_data_checks + order_checks
 
 
 def aggregate_status(checks: list[dict[str, Any]], course_findings: list[dict[str, Any]]) -> tuple[str, int, int, int]:

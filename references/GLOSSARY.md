@@ -3,7 +3,9 @@
 - **审核目标（Audit Target）**：本次审核读取并检查的课程状态。V1 检查 Studio 中已保存的编辑版本，包括已保存但尚未发布的修改；不包括浏览器中尚未保存的编辑，也不等于 LMS 学员端的已发布版本。
 - **租户（Tenant）**：运营选择的 Studio 环境身份，用于确定允许访问的 Studio host；它与 course key 中的组织标识相互独立。URL 快捷输入必须映射到唯一已配置租户。
 - **课程定位符（Course Locator）**：用于标识审核目标课程的值。校验运营提供 tenant profile 与完整 `course-v1:...` course key，或使用能明确解析为这两项、且 host 匹配唯一配置 profile 的 Studio 课程/小节 URL；不接受短课程编号或无法明确解析的 URL。
-- **目标小节（Audit Unit）**：V1 从整门课程中定位 Studio 名称去除首尾空格后完整匹配“赋能内容”的 vertical。每个这样的 vertical 是一个筛查目标，必须恰有一个 ImageGallery 和恰有一个 Studio 名称去除首尾空格后完整匹配“本节要点”的 HTML 组件；不接受部分匹配。
+- **目标小节（Audit Unit）**：V1 从整门课程中定位 Studio 名称去除首尾空格后完整匹配“赋能内容”的 vertical。每个这样的 vertical 是一个筛查目标，必须恰有一个 ImageGallery 且它位于第一个直接子组件，还必须恰有一个名称去除首尾空格后完整匹配“本节要点”的 HTML 组件且它位于最后一个直接子组件；不接受部分匹配。
+- **直接子组件（Direct Child Component）**：直接位于目标 vertical 之下的组件；层级更深的组件属于后代，不计入该 vertical 的直接子组件。
+- **组件位置（Component Position）**：组件在 Studio 保存的目标 vertical 直接子组件顺序中的从 1 开始的位置。
 - **审核类目（Audit Category）**：用于把相关审核检查项归组的类目，例如 ImageGallery 或 HTML 要点检查。
 - **检查项（Audit Check）**：一条独立的审核规则，有稳定标识、名称、目标范围、检查内容和通过标准。
 - **检查清单（Audit Checklist）**：供校验运营查看的类目化检查项目录，说明每项检查的适用范围和通过标准。
