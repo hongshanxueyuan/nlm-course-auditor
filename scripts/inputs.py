@@ -20,6 +20,11 @@ VERTICAL_LOCATOR_PATTERN = re.compile(
 )
 
 
+DEFAULT_TENANTS: dict[str, dict[str, str]] = {
+    "main": {"studio_base": "https://studio.firacademy.com"},
+}
+
+
 def validate_course_key(course_id: str) -> None:
     if not isinstance(course_id, str) or not COURSE_KEY_PATTERN.fullmatch(course_id):
         raise AuditError("Provide a complete course-v1:ORG+COURSE+RUN course key.")
@@ -113,7 +118,7 @@ def validated_tenant_profile(tenant: str, profile: Any) -> tuple[str, str]:
 
 def read_tenants(config_path: Path) -> dict[str, Any]:
     if not config_path.is_file():
-        raise AuditError(f"Tenant configuration file was not found: {config_path}")
+        return {}
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -126,7 +131,11 @@ def read_tenants(config_path: Path) -> dict[str, Any]:
 
 def load_tenant(tenant: str, config_path: Path) -> tuple[str, str]:
     tenants = read_tenants(config_path)
-    return validated_tenant_profile(tenant, tenants.get(tenant))
+    if tenant in tenants:
+        profile = tenants[tenant]
+    else:
+        profile = DEFAULT_TENANTS.get(tenant)
+    return validated_tenant_profile(tenant, profile)
 
 
 def resolve_audit_input(
@@ -142,11 +151,23 @@ def resolve_audit_input(
             raise AuditError("Choose either tenant/course key or one Studio URL input.")
         host_key, resolved_course_id = parse_studio_course_url(studio_url)
         tenants = read_tenants(tenant_config_path)
-        matches: list[tuple[str, str, str]] = []
-        for profile_name, profile in tenants.items():
-            studio_base, courses_base = validated_tenant_profile(str(profile_name), profile)
-            if url_host_key(studio_base) == host_key:
-                matches.append((str(profile_name), studio_base, courses_base))
+
+        def matching_profiles(profiles: dict[str, Any]) -> list[tuple[str, str, str]]:
+            found: list[tuple[str, str, str]] = []
+            for profile_name, profile in profiles.items():
+                studio_base, courses_base = validated_tenant_profile(str(profile_name), profile)
+                if url_host_key(studio_base) == host_key:
+                    found.append((str(profile_name), studio_base, courses_base))
+            return found
+
+        matches = matching_profiles(tenants)
+        if not matches:
+            built_in_profiles = {
+                name: profile
+                for name, profile in DEFAULT_TENANTS.items()
+                if name not in tenants
+            }
+            matches = matching_profiles(built_in_profiles)
         if not matches:
             raise AuditError("Studio URL host does not match a configured tenant profile.")
         if len(matches) != 1:
