@@ -235,7 +235,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert report["tenant"] == "uat"
     assert report["course_id"] == COURSE_KEY
     assert report["status"] == "pass"
-    assert report["pass_count"] == 5
+    assert report["pass_count"] == 7
     assert report["issue_count"] == 0
     assert report["unverified_count"] == 0
     assert report["course_findings"] == []
@@ -251,11 +251,23 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         "NLMCA-003",
         "NLMCA-004",
         "NLMCA-005",
+        "NLMCA-008",
+        "NLMCA-009",
     ]
     assert all(check["status"] == "pass" for check in section["checks"])
     assert section["checks"][2]["actual"] == {"valid_file_count": 2, "total_count": 2}
     assert section["checks"][3]["actual"] == {"time_config_count": 2, "valid_file_count": 2}
     assert section["checks"][4]["actual"] == {"audio_binding_count": 1}
+    assert section["checks"][5]["actual"] == {
+        "direct_child_count": 2,
+        "imagesgallery_positions": [1],
+        "first_child": {"position": 1, "category": "imagesgallery", "name": "课程讲解"},
+    }
+    assert section["checks"][6]["actual"] == {
+        "direct_child_count": 2,
+        "summary_positions": [2],
+        "last_child": {"position": 2, "category": "html", "name": "本节要点"},
+    }
 
     output_dir = tmp_path / "auditor" / COURSE_KEY.replace(":", "_")
     assert json.loads((output_dir / "course-structure.json").read_text(encoding="utf-8")) == reader.course_tree
@@ -299,10 +311,149 @@ def test_confirmed_component_and_gallery_count_violations_are_issues(tmp_path):
     assert checks[0]["actual"] == {"count": 2}
     assert checks[1]["status"] == "issue"
     assert checks[1]["actual"] == {"count": 2}
-    assert [check["status"] for check in checks[2:]] == ["issue"] * 6
+    assert [check["status"] for check in checks[2:8]] == ["issue"] * 6
+    assert [check["status"] for check in checks[8:]] == ["pass", "pass"]
     assert report["status"] == "issue"
     assert report["issue_count"] == 8
     assert report["unverified_count"] == 0
+
+
+def test_other_direct_children_may_appear_between_required_components(tmp_path):
+    tree = course_tree_with_one_target()
+    blocks = tree["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"]
+    gallery, summary = blocks
+    blocks[:] = [
+        gallery,
+        {"id": "block-v1:FIRAx+1040663+20261018+type@problem+block@quiz", "category": "problem", "display_name": "测验"},
+        summary,
+    ]
+    reader = FakeStudioReader(course_tree=tree)
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {check["check_id"]: check for check in report["target_sections"][0]["checks"]}
+    assert report["status"] == "pass"
+    assert checks["NLMCA-008"]["actual"]["imagesgallery_positions"] == [1]
+    assert checks["NLMCA-009"]["actual"]["summary_positions"] == [3]
+
+
+def test_component_order_checks_report_wrong_boundaries_and_safe_positions(tmp_path):
+    tree = course_tree_with_one_target()
+    blocks = tree["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"]
+    blocks[:] = [
+        {
+            "id": "block-v1:FIRAx+1040663+20261018+type@html+block@summary",
+            "category": "html",
+            "display_name": "本节要点",
+            "data": "private html body",
+        },
+        {"id": GALLERY, "category": "imagesgallery", "display_name": "有声幻灯片"},
+        {"id": "block-v1:FIRAx+1040663+20261018+type@problem+block@quiz", "category": "problem", "display_name": "测验"},
+    ]
+    reader = FakeStudioReader(course_tree=tree)
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {check["check_id"]: check for check in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-008"]["status"] == "issue"
+    assert checks["NLMCA-008"]["actual"] == {
+        "direct_child_count": 3,
+        "imagesgallery_positions": [2],
+        "first_child": {"position": 1, "category": "html", "name": "本节要点"},
+    }
+    assert checks["NLMCA-009"]["status"] == "issue"
+    assert checks["NLMCA-009"]["actual"] == {
+        "direct_child_count": 3,
+        "summary_positions": [1],
+        "last_child": {"position": 3, "category": "problem", "name": "测验"},
+    }
+    assert report["issue_count"] == 2
+    assert report["target_sections"][0]["studio_url"].endswith(VERTICAL)
+    assert "private html body" not in json.dumps(report, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("remaining_component", ["gallery", "summary"])
+def test_missing_one_required_component_is_reported_separately_from_order(tmp_path, remaining_component):
+    tree = course_tree_with_one_target()
+    blocks = tree["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"]
+    gallery, summary = blocks
+    blocks[:] = [gallery if remaining_component == "gallery" else summary]
+    reader = FakeStudioReader(course_tree=tree)
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {check["check_id"]: check for check in report["target_sections"][0]["checks"]}
+    assert report["issue_count"] == 2
+    if remaining_component == "gallery":
+        assert [checks[check_id]["status"] for check_id in ("NLMCA-001", "NLMCA-002", "NLMCA-008", "NLMCA-009")] == ["pass", "issue", "pass", "issue"]
+        assert reader.calls == [
+            ("get_course_structure", COURSE_KEY),
+            ("get_files", GALLERY),
+            ("get_play_config", GALLERY),
+            ("get_audios", GALLERY),
+        ]
+    else:
+        assert [checks[check_id]["status"] for check_id in ("NLMCA-001", "NLMCA-002", "NLMCA-008", "NLMCA-009")] == ["issue", "pass", "issue", "pass"]
+        assert reader.calls == [("get_course_structure", COURSE_KEY)]
+
+
+def test_nested_gallery_and_summary_do_not_count_as_direct_children(tmp_path):
+    tree = course_tree_with_one_target()
+    blocks = tree["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"]
+    blocks[:] = [
+        {
+            "id": "block-v1:FIRAx+1040663+20261018+type@html+block@outer-gallery",
+            "category": "html",
+            "display_name": "文字讲解",
+            "child_info": {"children": [{"id": GALLERY, "category": "imagesgallery", "display_name": "课程讲解"}]},
+        },
+        {
+            "id": "block-v1:FIRAx+1040663+20261018+type@html+block@outer-summary",
+            "category": "html",
+            "display_name": "内容容器",
+            "child_info": {
+                "children": [
+                    {
+                        "id": "block-v1:FIRAx+1040663+20261018+type@html+block@nested-summary",
+                        "category": "html",
+                        "display_name": "本节要点",
+                    }
+                ]
+            },
+        },
+    ]
+    reader = FakeStudioReader(course_tree=tree)
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {check["check_id"]: check for check in report["target_sections"][0]["checks"]}
+    assert [checks[check_id]["status"] for check_id in ("NLMCA-001", "NLMCA-002", "NLMCA-008", "NLMCA-009")] == ["issue"] * 4
+    assert report["issue_count"] == 4
+    assert reader.calls == [("get_course_structure", COURSE_KEY)]
 
 
 def test_missing_required_components_are_reported_as_issues(tmp_path):
@@ -320,10 +471,13 @@ def test_missing_required_components_are_reported_as_issues(tmp_path):
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["issue", "issue"]
-    assert [check["actual"] for check in checks] == [{"count": 0}, {"count": 0}]
+    assert [check["check_id"] for check in checks] == ["NLMCA-001", "NLMCA-002", "NLMCA-008", "NLMCA-009"]
+    assert [check["status"] for check in checks] == ["issue"] * 4
+    assert [check["actual"] for check in checks[:2]] == [{"count": 0}, {"count": 0}]
+    assert checks[2]["actual"]["direct_child_count"] == 0
+    assert checks[3]["actual"]["direct_child_count"] == 0
     assert report["status"] == "issue"
-    assert report["issue_count"] == 2
+    assert report["issue_count"] == 4
     assert reader.calls == [("get_course_structure", COURSE_KEY)]
 
 
@@ -347,10 +501,10 @@ def test_target_without_a_vertical_link_cannot_produce_section_issues(tmp_path):
 
     section = report["target_sections"][0]
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["unverified"] * 5
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 7
     assert report["status"] == "unverified"
     assert report["issue_count"] == 0
-    assert report["unverified_count"] == 5
+    assert report["unverified_count"] == 7
     assert reader.calls == [("get_course_structure", COURSE_KEY)]
 
 
@@ -419,7 +573,7 @@ def test_gallery_read_failure_keeps_independent_checks_running_and_redacts_error
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "pass"]
+    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "pass", "pass", "pass"]
     assert checks[2]["evidence"]["http_status"] == 503
     assert reader.calls == [
         ("get_course_structure", COURSE_KEY),
@@ -452,9 +606,9 @@ def test_confirmed_issue_takes_priority_over_independent_unverified_check_counts
     )
 
     assert report["status"] == "issue"
-    assert report["issue_count"] == 1
+    assert report["issue_count"] == 2
     assert report["unverified_count"] == 2
-    assert report["pass_count"] == 2
+    assert report["pass_count"] == 3
 
 
 def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp_path):
@@ -476,10 +630,10 @@ def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "unverified"]
+    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "unverified", "pass", "pass"]
     assert report["status"] == "unverified"
     assert report["unverified_count"] == 3
-    assert all(check["evidence"]["failure_category"] == "invalid_response" for check in checks[2:])
+    assert all(check["evidence"]["failure_category"] == "invalid_response" for check in checks[2:5])
     report_text = json.dumps(report, ensure_ascii=False)
     assert private_payload not in report_text
     assert "private-audio.mp3" not in report_text
@@ -505,7 +659,7 @@ def test_untrusted_block_locator_values_are_omitted_from_report_links(tmp_path):
     section = report["target_sections"][0]
     assert section["locator"] == ""
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["unverified"] * 5
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 7
     report_text = json.dumps(report, ensure_ascii=False)
     assert private_locator not in report_text
     assert "locator-secret" not in report_text
@@ -602,7 +756,7 @@ def test_unresolved_auth_failure_refreshes_only_to_a_bound_then_stops_run(tmp_pa
 
     finding = report["course_findings"][0]
     assert report["status"] == "issue"
-    assert report["issue_count"] == 1
+    assert report["issue_count"] == 2
     assert report["unverified_count"] == 1
     assert finding["check_id"] == "NLMCA-007"
     assert finding["evidence"]["failure_category"] == "authentication_failure"
@@ -616,7 +770,7 @@ def test_unresolved_auth_failure_refreshes_only_to_a_bound_then_stops_run(tmp_pa
         ("get_files", GALLERY),
         ("get_files", GALLERY),
     ]
-    assert [check["status"] for check in report["target_sections"][0]["checks"]] == ["pass", "issue"]
+    assert [check["status"] for check in report["target_sections"][0]["checks"]] == ["pass", "issue", "pass", "issue"]
 
 
 def test_course_and_section_urls_resolve_to_the_unique_configured_tenant(tmp_path):
