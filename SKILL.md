@@ -12,7 +12,7 @@ disable-model-invocation: true
 
 ## 运行审核
 
-1. 主站租户 `main`（`https://studio.firacademy.com`）内置可用；使用主站课程 URL 或 `--tenant main` 时无需准备配置文件。其他租户在审核工作目录准备 `tenant-config.json`，其中包含 `tenants` 配置对象。每个租户配置项设置 `studio_base`，也可设置 `courses_base`。配置示例见 [tenant-config.example.json](references/tenant-config.example.json)。
+1. 主站租户 `fira`（`https://studio.firacademy.com`）内置可用；使用主站课程 URL 或 `--tenant fira` 时无需准备配置文件。其他租户在审核工作目录准备 `tenant-config.json`，其中包含 `tenants` 配置对象。每个租户配置项设置 `studio_base`，也可设置 `courses_base`。配置示例见 [tenant-config.example.json](references/tenant-config.example.json)。
 2. 选择一种课程定位方式。
 
    已配置的租户 key 和完整 course key：

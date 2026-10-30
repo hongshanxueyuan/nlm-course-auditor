@@ -21,7 +21,7 @@ VERTICAL_LOCATOR_PATTERN = re.compile(
 
 
 DEFAULT_TENANTS: dict[str, dict[str, str]] = {
-    "main": {"studio_base": "https://studio.firacademy.com"},
+    "fira": {"studio_base": "https://studio.firacademy.com"},
 }
 
 
