@@ -12,7 +12,7 @@ disable-model-invocation: true
 
 ## 运行审核
 
-1. 在审核工作目录准备 `tenant-config.json`，其中包含 `tenants` 配置对象。每个租户配置项设置 `studio_base`，也可设置 `courses_base`。配置示例见 [tenant-config.example.json](references/tenant-config.example.json)。
+1. 主站租户 `main`（`https://studio.firacademy.com`）内置可用；使用主站课程 URL 或 `--tenant main` 时无需准备配置文件。其他租户在审核工作目录准备 `tenant-config.json`，其中包含 `tenants` 配置对象。每个租户配置项设置 `studio_base`，也可设置 `courses_base`。配置示例见 [tenant-config.example.json](references/tenant-config.example.json)。
 2. 选择一种课程定位方式。
 
    已配置的租户 key 和完整 course key：
@@ -30,7 +30,7 @@ disable-model-invocation: true
      --studio-url 'https://studio.example.com/course/course-v1:ORG+COURSE+RUN'
    ```
 
-   URL 输入也支持 `/container/block-v1:...+type@vertical+block@...` 小节链接。URL 的 host 和 port 必须恰好匹配一个已配置的租户配置项；请求会使用该配置项的 `studio_base`。程序会在创建认证客户端前拒绝不支持或不完整的 URL，以及同时填写两种课程定位方式的输入。
+   URL 输入也支持 `/container/block-v1:...+type@vertical+block@...` 小节链接。URL 的 host 和 port 必须恰好匹配一个租户配置项；显式配置优先，未匹配时再尝试内置主站租户。请求会使用匹配配置中的 `studio_base`。程序会在创建认证客户端前拒绝不支持或不完整的 URL，以及同时填写两种课程定位方式的输入。
 3. 通过环境变量配置认证：
    - 账号密码：`FIRA_SAAS_OP_ACCOUNT` 和 `FIRA_SAAS_OP_PASSWORD`。
    - 现有会话：`FIRA_SAAS_OP_COOKIE` 和匹配的 `FIRA_SAAS_OP_CSRF_TOKEN`；Cookie 中也可包含 `csrftoken`。
