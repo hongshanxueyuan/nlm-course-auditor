@@ -455,8 +455,7 @@ def saved_subtitle_check(
                 "failure_category": "invalid_response",
                 "summary": "Studio play_config.time_config has one or more missing or unreadable subtitle values.",
             })
-        page = item.get("page")
-        page_number = page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else index
+        page_number = subtitle_page_number(item, index)
         marker_count = sum(match.group(0).count(">") for match in BLOCKQUOTE_PREFIX_RE.finditer(item["subtitle"]))
         if marker_count:
             page_counts[page_number] = page_counts.get(page_number, 0) + marker_count
@@ -496,6 +495,11 @@ def saved_subtitle_check(
     )
 
 
+def subtitle_page_number(item: dict[str, Any], index: int) -> int:
+    page = item.get("page")
+    return page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else index
+
+
 def markdown_block_types(markdown: str) -> list[str]:
     """Return the top-level block types used by the subtitle-order check."""
     blocks: list[str] = []
@@ -531,8 +535,7 @@ def subtitle_heading_order_check(
             ):
                 continue
             eligible_count += 1
-            page = item.get("page")
-            page_number = page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else index
+            page_number = subtitle_page_number(item, index)
             blocks = markdown_block_types(item["subtitle"])
             if blocks and blocks[0] == "paragraph":
                 later_heading_count = sum(block == "heading" for block in blocks[1:])
