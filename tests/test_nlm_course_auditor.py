@@ -319,6 +319,31 @@ def test_time_config_exceeding_valid_files_reports_operator_hint_in_all_outputs(
     assert capsys.readouterr().out.strip() == json.dumps(report, ensure_ascii=False, indent=2)
 
 
+def test_time_config_fewer_than_valid_files_remains_factual_issue_without_operator_hint(tmp_path):
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {"play_config": {"time_config": [
+            {"page": 1, "subtitle": "Saved subtitle for page one"},
+        ]}}
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    check = next(item for item in report["target_sections"][0]["checks"] if item["check_id"] == "NLMCA-004")
+    assert check["status"] == "issue"
+    assert check["actual"] == {"time_config_count": 1, "valid_file_count": 2}
+    assert check["evidence"]["time_config_count"] == 1
+    assert "operator_hint" not in check
+    assert report["status"] == "issue"
+    assert report["issue_count"] == 1
+    assert report["unverified_count"] == 0
+
+
 def test_non_list_time_config_reports_audio_subtitle_operator_hint(tmp_path):
     reader = FakeStudioReader(gallery_overrides={
         "play_config": {"play_config": {"time_config": "unreadable"}}
