@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
+from markdown_it import MarkdownIt
+
 from .errors import AuditError, GlobalAuthenticationError
 from .inputs import SAFE_BLOCK_LOCATOR_PATTERN, VERTICAL_LOCATOR_PATTERN, validate_course_key
 
@@ -24,6 +26,10 @@ TIME_CONFIG_EXCEEDS_FILES_HINT = "大概率是 imagegallery 有几页图片未�
 INVALID_TIME_CONFIG_HINT = "大概率是 imagegallery 的音频字幕未成功上传。"
 BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
 SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
+SUBTITLE_HEADING_ORDER_CHECK_NAME = "Readable Gallery subtitles begin with a paragraph before any Markdown heading"
+SUBTITLE_HEADING_ORDER_HINT = "大概率是 AI 段落划分不准确。"
+SUBTITLE_HEADING_ORDER_EXPECTED = {"first_content_block": "paragraph", "later_markdown_heading": True}
+SUBTITLE_MARKDOWN = MarkdownIt("commonmark").enable("table")
 
 
 class StudioReader(Protocol):
@@ -308,13 +314,19 @@ def gallery_checks(
         else:
             config_failure = None
     except GlobalAuthenticationError as exc:
+        config_failure = read_failure("get_play_config", exc)
         subtitle_check = saved_subtitle_check(
             None,
             gallery_locator,
             section_studio_url=section_studio_url,
-            config_failure=read_failure("get_play_config", exc),
+            config_failure=config_failure,
         )
-        exc.completed_checks = list(checks) + [subtitle_check]
+        heading_order_check = subtitle_heading_order_check(
+            None,
+            gallery_locator,
+            section_studio_url=section_studio_url,
+        )
+        exc.completed_checks = list(checks) + [subtitle_check, heading_order_check]
         raise
     except Exception as exc:
         time_config = None
@@ -357,6 +369,11 @@ def gallery_checks(
         section_studio_url=section_studio_url,
         config_failure=config_failure,
     )
+    heading_order_check = subtitle_heading_order_check(
+        time_config if not config_failure else None,
+        gallery_locator,
+        section_studio_url=section_studio_url,
+    )
 
     try:
         audio_payload = authenticated_read(
@@ -374,7 +391,7 @@ def gallery_checks(
         else:
             audio_failure = None
     except GlobalAuthenticationError as exc:
-        exc.completed_checks = list(checks) + [subtitle_check]
+        exc.completed_checks = list(checks) + [subtitle_check, heading_order_check]
         raise
     except Exception as exc:
         audios = None
@@ -396,6 +413,7 @@ def gallery_checks(
             {"gallery_locator": gallery_locator, "audio_binding_count": audio_count},
         ))
     checks.append(subtitle_check)
+    checks.append(heading_order_check)
     return checks
 
 
@@ -478,11 +496,85 @@ def saved_subtitle_check(
     )
 
 
+def markdown_block_types(markdown: str) -> list[str]:
+    """Return the top-level block types used by the subtitle-order check."""
+    blocks: list[str] = []
+    for token in SUBTITLE_MARKDOWN.parse(markdown):
+        if token.level != 0:
+            continue
+        if token.type == "heading_open":
+            blocks.append("heading")
+        elif token.type == "paragraph_open":
+            blocks.append("paragraph")
+        elif token.nesting == 1 or token.type in {"code_block", "fence", "hr", "html_block"}:
+            blocks.append("other")
+    return blocks
+
+
+def subtitle_heading_order_check(
+    time_config: Any,
+    gallery_locator: str,
+    *,
+    section_studio_url: str | None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {"gallery_locator": gallery_locator}
+    expected = SUBTITLE_HEADING_ORDER_EXPECTED
+
+    eligible_count = 0
+    affected_pages: dict[int, int] = {}
+    if isinstance(time_config, list):
+        for index, item in enumerate(time_config, start=1):
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("subtitle"), str)
+                or not item["subtitle"].strip()
+            ):
+                continue
+            eligible_count += 1
+            page = item.get("page")
+            page_number = page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else index
+            blocks = markdown_block_types(item["subtitle"])
+            if blocks and blocks[0] == "paragraph":
+                later_heading_count = sum(block == "heading" for block in blocks[1:])
+                if later_heading_count:
+                    affected_pages.setdefault(page_number, later_heading_count)
+
+    affected = [
+        {"page": page, "opening_block": "paragraph", "later_heading_count": heading_count}
+        for page, heading_count in sorted(affected_pages.items())
+    ]
+    affected_count = len(affected)
+    status = "issue" if affected_count else "pass"
+    if affected_count:
+        page_list = ", ".join(str(item["page"]) for item in affected)
+        summary = (
+            f"A paragraph precedes a Markdown heading on {affected_count} of {eligible_count} readable subtitle page(s): "
+            f"page {page_list}."
+        )
+    else:
+        summary = "No readable subtitle page begins with a paragraph followed by a Markdown heading."
+    if section_studio_url and affected_count:
+        summary += f" [Open Studio section]({section_studio_url})"
+    evidence.update({
+        "eligible_page_count": eligible_count,
+        "affected_pages": affected,
+        "affected_page_count": affected_count,
+        "summary": summary,
+    })
+    return check_result(
+        "NLMCA-011", "ImageGallery", SUBTITLE_HEADING_ORDER_CHECK_NAME, status,
+        expected,
+        {"eligible_page_count": eligible_count, "affected_page_count": affected_count},
+        evidence,
+        operator_hint=SUBTITLE_HEADING_ORDER_HINT if affected_count else None,
+    )
+
+
 def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> list[dict[str, Any]]:
     vertical_locator = vertical_locator_of(vertical)
     if not vertical_locator:
         summary = "Studio course structure did not identify a valid vertical locator."
-        return [
+        checks = [
             check_result(
                 check_id,
                 category,
@@ -507,6 +599,12 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                 ("NLMCA-009", "组件顺序", "“本节要点”位于目标小节末尾", {"last_child_category": "html", "last_child_name": SUMMARY_COMPONENT_NAME}),
             )
         ]
+        checks.append(subtitle_heading_order_check(
+            None,
+            "",
+            section_studio_url=None,
+        ))
+        return checks
     children = children_of(vertical)
     galleries = [child for child in children if category_of(child) == "imagesgallery"]
     named_html = [
@@ -585,6 +683,11 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                     ("NLMCA-010", SAVED_SUBTITLE_CHECK_NAME, {"all_subtitles_readable_without_blockquote_prefixes": True}),
                 )
             ])
+            gallery_data_checks.append(subtitle_heading_order_check(
+                None,
+                gallery_locator,
+                section_studio_url=vertical_studio_url(studio_reader.studio_base, vertical_locator),
+            ))
             continue
         try:
             gallery_data_checks.extend(gallery_checks(

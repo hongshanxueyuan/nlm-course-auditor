@@ -23,10 +23,13 @@
 | NLMCA-004 | 时间配置条目数与有效文件记录数一致 | 目标 vertical 中的每个 ImageGallery | 比较 `play_config.time_config` 的条目数与有效文件记录数 | 两个数量相等 |
 | NLMCA-005 | Gallery 恰有一个音频绑定 | 目标 vertical 中的每个 ImageGallery | 统计 `get_audios.audios` 中的绑定数 | 数量恰为 1 |
 | NLMCA-010 | 已保存字幕没有行首引用标记 | 目标 vertical 中的每个 ImageGallery | 扫描 `play_config.time_config[].subtitle`；在行首 0–3 个空格后，统计连续 `>` 标记及其间/后的 ASCII 空格 | 全部字幕均可读取且没有匹配标记时通过；问题证据列出页码和标记数，并提供目标小节 Studio 链接，不包含字幕原文 |
+| NLMCA-011 | 正文段落之后才出现 Markdown 标题 | 目标 vertical 中的每个 ImageGallery | 检查可读、非空的 `play_config.time_config[].subtitle` Markdown 块顺序；识别 ATX 与 Setext 标题 | 首个非空块是普通段落且后续出现标题时记为问题；证据只列页码和计数 |
 
 NLMCA-004 在 `time_config` 是列表且条目数多于有效文件记录数时，额外提供“`imagegallery` 有几页图片未成功上传”的运营排查提示；当 `time_config` 不是列表时，提供“`imagegallery` 的音频字幕未成功上传”的运营排查提示。提示基于运营经验，不是检查证据或已确认的根因。时间配置条目少于有效文件记录数和其他检查情形不附带这两条提示；这些提示不改变检查状态和统计。
 
 NLMCA-010 在发现匹配标记时记为 `issue`；没有字幕记录、字幕缺失或空白、格式无效或读取失败时记为 `unverified`。它只报告已保存字幕的文本风险，不检查已有 MP3 的实际读音。
+
+NLMCA-011 忽略空白块；只在首个非空块为普通段落、且后续存在 ATX 或 Setext 标题时报告该页。加粗文本本身不算标题；首块为标题、列表、引用、表格或代码块时不触发。一页最多报告一次。缺失、空白或不可读字幕不参与此检查，由 NLMCA-010 报告；没有适用字幕页时通过，适用页数为 0。命中时，证据列出页码、适用页数和受影响页数，不包含字幕原文；`operator_hint` 单独提示“大概率是 AI 段落划分不准确”，这是排查线索，不是审核确认的原因。
 
 ## 课程范围
 
