@@ -20,6 +20,8 @@ TARGET_VERTICAL_NAME = "赋能内容"
 
 
 SUMMARY_COMPONENT_NAME = "本节要点"
+TIME_CONFIG_EXCEEDS_FILES_HINT = "大概率是 imagegallery 有几页图片未成功上传。"
+INVALID_TIME_CONFIG_HINT = "大概率是 imagegallery 的音频字幕未成功上传。"
 BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
 SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
 
@@ -159,8 +161,10 @@ def check_result(
     expected: Any,
     actual: Any,
     evidence: dict[str, Any],
+    *,
+    operator_hint: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "check_id": check_id,
         "category": category,
         "name": name,
@@ -169,6 +173,9 @@ def check_result(
         "actual": actual,
         "evidence": evidence,
     }
+    if operator_hint is not None:
+        result["operator_hint"] = operator_hint
+    return result
 
 
 def issue_or_pass(actual_count: int, expected_count: int) -> str:
@@ -282,6 +289,7 @@ def gallery_checks(
             {"gallery_locator": gallery_locator, "valid_file_count": file_count, "total_count": total_count},
         ))
 
+    invalid_time_config = False
     try:
         config_payload = authenticated_read(
             studio_reader,
@@ -291,6 +299,7 @@ def gallery_checks(
         play_config = config_payload.get("play_config") if isinstance(config_payload, dict) else None
         time_config = play_config.get("time_config") if isinstance(play_config, dict) else None
         if not isinstance(time_config, list):
+            invalid_time_config = True
             config_failure = {
                 "failure_stage": "get_play_config",
                 "failure_category": "invalid_response",
@@ -316,6 +325,7 @@ def gallery_checks(
             "NLMCA-004", "ImageGallery", "Timing-entry count matches valid files", "unverified",
             {"time_config_count_equals_valid_file_count": True}, None,
             {"gallery_locator": gallery_locator, **config_failure},
+            operator_hint=INVALID_TIME_CONFIG_HINT if invalid_time_config else None,
         ))
     elif files is None:
         checks.append(check_result(
@@ -338,6 +348,7 @@ def gallery_checks(
             {"time_config_count_equals_valid_file_count": True},
             {"time_config_count": config_count, "valid_file_count": file_count},
             {"gallery_locator": gallery_locator, "time_config_count": config_count, "valid_file_count": file_count},
+            operator_hint=TIME_CONFIG_EXCEEDS_FILES_HINT if config_count > file_count else None,
         ))
 
     subtitle_check = saved_subtitle_check(
@@ -613,7 +624,7 @@ def make_report(
     checks = [check for section in target_sections for check in section["checks"]]
     status, pass_count, issue_count, unverified_count = aggregate_status(checks, course_findings)
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "tenant": tenant,
         "course_id": course_id,
         "audited_at": audited_at or utc_now(),

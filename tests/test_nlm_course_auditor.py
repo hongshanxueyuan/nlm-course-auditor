@@ -237,7 +237,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         ("get_play_config", GALLERY),
         ("get_audios", GALLERY),
     ]
-    assert report["schema_version"] == "1.0.0"
+    assert report["schema_version"] == "1.1.0"
     assert report["tenant"] == "uat"
     assert report["course_id"] == COURSE_KEY
     assert report["status"] == "pass"
@@ -264,6 +264,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert all(check["status"] == "pass" for check in section["checks"])
     assert section["checks"][2]["actual"] == {"valid_file_count": 2, "total_count": 2}
     assert section["checks"][3]["actual"] == {"time_config_count": 2, "valid_file_count": 2}
+    assert "operator_hint" not in section["checks"][3]
     assert section["checks"][4]["actual"] == {"audio_binding_count": 1}
     assert section["checks"][5]["actual"] == {"affected_page_count": 0, "marker_count": 0}
     assert section["checks"][6]["actual"] == {
@@ -286,6 +287,59 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     report_text = json.dumps(report, ensure_ascii=False)
     for private_value in ("page-one.png", "media.test", "audio-secret", "Do not include this body"):
         assert private_value not in report_text
+
+
+def test_time_config_exceeding_valid_files_reports_operator_hint_in_all_outputs(tmp_path, capsys):
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {"play_config": {"time_config": [
+            {"page": 1, "subtitle": "Saved subtitle for page one"},
+            {"page": 2, "subtitle": "Saved subtitle for page two"},
+            {"page": 3, "subtitle": "Saved subtitle for page three"},
+        ]}}
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    check = next(item for item in report["target_sections"][0]["checks"] if item["check_id"] == "NLMCA-004")
+    assert report["schema_version"] == "1.1.0"
+    assert check["status"] == "issue"
+    assert check["actual"] == {"time_config_count": 3, "valid_file_count": 2}
+    assert check["evidence"]["time_config_count"] == 3
+    assert check["operator_hint"] == "大概率是 imagegallery 有几页图片未成功上传。"
+    assert report["status"] == "issue"
+    assert report["issue_count"] == 1
+    output_dir = tmp_path / "auditor" / COURSE_KEY.replace(":", "_")
+    assert json.loads((output_dir / "report.json").read_text(encoding="utf-8")) == report
+    assert capsys.readouterr().out.strip() == json.dumps(report, ensure_ascii=False, indent=2)
+
+
+def test_non_list_time_config_reports_audio_subtitle_operator_hint(tmp_path):
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {"play_config": {"time_config": "unreadable"}}
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-004"]["status"] == "unverified"
+    assert checks["NLMCA-004"]["actual"] is None
+    assert checks["NLMCA-004"]["evidence"]["failure_category"] == "invalid_response"
+    assert checks["NLMCA-004"]["operator_hint"] == "大概率是 imagegallery 的音频字幕未成功上传。"
+    assert checks["NLMCA-010"]["status"] == "unverified"
+    assert "operator_hint" not in checks["NLMCA-010"]
+    assert report["unverified_count"] == 2
 
 
 def test_saved_gallery_blockquote_prefixes_report_page_counts_and_section_link(tmp_path):
@@ -380,6 +434,7 @@ def test_missing_or_malformed_saved_subtitles_are_unverified_without_stopping_ga
     assert checks["NLMCA-010"]["evidence"]["failure_category"] == "invalid_response"
     assert checks["NLMCA-003"]["status"] == "pass"
     assert checks["NLMCA-005"]["status"] == "pass"
+    assert "operator_hint" not in checks["NLMCA-004"]
     assert "private lesson text" not in json.dumps(report, ensure_ascii=False)
 
 
@@ -401,6 +456,7 @@ def test_unreadable_saved_subtitles_are_unverified_and_audio_binding_check_conti
     assert checks["NLMCA-010"]["status"] == "unverified"
     assert checks["NLMCA-010"]["evidence"]["http_status"] == 503
     assert checks["NLMCA-005"]["status"] == "pass"
+    assert "operator_hint" not in checks["NLMCA-004"]
     assert private_error not in json.dumps(report, ensure_ascii=False)
 
 
@@ -437,6 +493,7 @@ def test_confirmed_component_and_gallery_count_violations_are_issues(tmp_path):
     assert checks[1]["actual"] == {"count": 2}
     assert [check["status"] for check in checks[2:10]] == ["issue", "issue", "issue", "pass"] * 2
     assert [check["status"] for check in checks[10:]] == ["pass", "pass"]
+    assert all("operator_hint" not in checks[index] for index in (2, 3, 6, 7))
     assert report["status"] == "issue"
     assert report["issue_count"] == 8
     assert report["unverified_count"] == 0
