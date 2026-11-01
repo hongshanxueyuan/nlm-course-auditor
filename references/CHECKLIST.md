@@ -24,6 +24,8 @@
 | NLMCA-005 | Gallery 恰有一个音频绑定 | 目标 vertical 中的每个 ImageGallery | 统计 `get_audios.audios` 中的绑定数 | 数量恰为 1 |
 | NLMCA-010 | 已保存字幕没有行首引用标记 | 目标 vertical 中的每个 ImageGallery | 扫描 `play_config.time_config[].subtitle`；在行首 0–3 个空格后，统计连续 `>` 标记及其间/后的 ASCII 空格 | 全部字幕均可读取且没有匹配标记时通过；问题证据列出页码和标记数，并提供目标小节 Studio 链接，不包含字幕原文 |
 
+NLMCA-004 在 `time_config` 是列表且条目数多于有效文件记录数时，额外提供“`imagegallery` 有几页图片未成功上传”的运营排查提示；当 `time_config` 不是列表时，提供“`imagegallery` 的音频字幕未成功上传”的运营排查提示。提示基于运营经验，不是检查证据或已确认的根因。时间配置条目少于有效文件记录数和其他检查情形不附带这两条提示；这些提示不改变检查状态和统计。
+
 NLMCA-010 在发现匹配标记时记为 `issue`；没有字幕记录、字幕缺失或空白、格式无效或读取失败时记为 `unverified`。它只报告已保存字幕的文本风险，不检查已有 MP3 的实际读音。
 
 ## 课程范围
