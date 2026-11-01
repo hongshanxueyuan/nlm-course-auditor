@@ -1,1 +1,2 @@
 requests>=2.31,<3
+markdown-it-py>=3,<5
