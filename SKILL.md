@@ -36,7 +36,7 @@ disable-model-invocation: true
    - 现有会话：`FIRA_SAAS_OP_COOKIE` 和匹配的 `FIRA_SAAS_OP_CSRF_TOKEN`；Cookie 中也可包含 `csrftoken`。
 
    如果租户配置文件不在当前目录，使用 `--tenant-config <path>` 指定。使用 `--working-directory <path>` 选择审核产物的保存位置。凭据只通过环境变量传入，避免出现在命令历史或进程参数中。使用账号密码登录时，程序会先在已配置的 Studio host 建立会话，再读取课程树。
-4. 查看程序打印的 JSON 报告，并打开各目标小节的 `studio_url`，在 Studio 中复核。
+4. 查看程序打印的 JSON 报告及课程专属产物。所有审核流程都通过程序和 Studio API 读取已保存数据；按规则生成的 `studio_url` 只作为报告链接提供。本 skill 的任何场景都不调用浏览器。
 
 当程序打印报告并刷新课程专属产物时，本轮运行完成。`pass` 以外的状态都需要运营复核。输入错误会在认证前退出；课程结构读取失败或认证重试后仍未恢复时，程序会打印 `unverified` 报告并停止审核。
 
@@ -44,7 +44,7 @@ disable-model-invocation: true
 
 ## 只读边界和检查范围
 
-每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}?format=concise`，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能先打开已配置的课程页面以获取 Studio CSRF cookie。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
+每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}?format=concise`，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程树。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
 
 审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，且它是第一个直接子组件；也必须恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件，且它是最后一个直接子组件。中间的直接子组件不受顺序限制，更深层的后代组件不参与这些检查。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数、音频绑定数是否为 1，扫描保存字幕中的行首 Markdown 引用标记，并检查正文段落是否先于 Markdown 标题。NLMCA-004 和 NLMCA-011 在命中时会附带运营排查提示；提示不改变检查结果或证据。稳定 ID 和通过标准见 [CHECKLIST.md](references/CHECKLIST.md)。
 
