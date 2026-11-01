@@ -491,6 +491,29 @@ def test_paragraph_before_setext_heading_is_reported(tmp_path):
     ]
 
 
+def test_subtitle_checks_fall_back_to_time_config_index_for_invalid_page_numbers(tmp_path):
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {"play_config": {"time_config": [
+            {"page": True, "subtitle": "> quoted text"},
+            {"subtitle": "> another quote"},
+            {"page": 0, "subtitle": "Private body.\n\n# Later heading"},
+            {"page": False, "subtitle": "Private body.\n\n# Later heading"},
+        ]}}
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert [item["page"] for item in checks["NLMCA-010"]["evidence"]["affected_pages"]] == [1, 2]
+    assert [item["page"] for item in checks["NLMCA-011"]["evidence"]["affected_pages"]] == [3, 4]
+
+
 @pytest.mark.parametrize("subtitle", [
     "# Page title\n\n## A later heading\n\n### Another heading",
     "- A list item\n\n# A later heading",
