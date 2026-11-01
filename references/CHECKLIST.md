@@ -1,6 +1,6 @@
 # NLM 课程审核检查清单
 
-这些检查只核对 Studio 已保存课程中的客观结构，不判断内容事实、教学质量、表达质量或媒体能否播放。
+这些检查只核对 Studio 已保存课程中的客观结构和字幕标记风险，不判断内容事实、教学质量、表达质量或已生成音频的实际读音。
 
 ## 目标组件
 
@@ -22,6 +22,9 @@
 | NLMCA-003 | Gallery 文件数与 `total_count` 一致 | 目标 vertical 中的每个 ImageGallery | 确认每条文件记录均有效且 Studio 资源 ID 唯一，再比较有效文件记录数与 `total_count` | 两个数量相等 |
 | NLMCA-004 | 时间配置条目数与有效文件记录数一致 | 目标 vertical 中的每个 ImageGallery | 比较 `play_config.time_config` 的条目数与有效文件记录数 | 两个数量相等 |
 | NLMCA-005 | Gallery 恰有一个音频绑定 | 目标 vertical 中的每个 ImageGallery | 统计 `get_audios.audios` 中的绑定数 | 数量恰为 1 |
+| NLMCA-010 | 已保存字幕没有行首引用标记 | 目标 vertical 中的每个 ImageGallery | 扫描 `play_config.time_config[].subtitle`；在行首 0–3 个空格后，统计连续 `>` 标记及其间/后的 ASCII 空格 | 全部字幕均可读取且没有匹配标记时通过；问题证据列出页码和标记数，并提供目标小节 Studio 链接，不包含字幕原文 |
+
+NLMCA-010 在发现匹配标记时记为 `issue`；没有字幕记录、字幕缺失或空白、格式无效或读取失败时记为 `unverified`。它只报告已保存字幕的文本风险，不检查已有 MP3 的实际读音。
 
 ## 课程范围
 

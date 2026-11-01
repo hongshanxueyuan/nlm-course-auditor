@@ -48,7 +48,10 @@ class FakeStudioReader:
     def get_play_config(self, gallery_locator):
         self.calls.append(("get_play_config", gallery_locator))
         return self._gallery_response(
-            "play_config", {"play_config": {"time_config": [{"page": 1}, {"page": 2}]}}
+            "play_config", {"play_config": {"time_config": [
+                {"page": 1, "subtitle": "Saved subtitle for page one"},
+                {"page": 2, "subtitle": "Saved subtitle for page two"},
+            ]}}
         )
 
     def get_audios(self, gallery_locator):
@@ -133,7 +136,10 @@ class FakeHttpSession:
                 return FakeHttpResponse({"error": "Not Login yet"})
             return FakeHttpResponse({"files": [{"id": "asset-1"}, {"id": "asset-2"}], "total_count": 2})
         if parsed.path.endswith("/handler/get_play_config"):
-            return FakeHttpResponse({"play_config": {"time_config": [{"page": 1}, {"page": 2}]}})
+            return FakeHttpResponse({"play_config": {"time_config": [
+                {"page": 1, "subtitle": "Saved subtitle for page one"},
+                {"page": 2, "subtitle": "Saved subtitle for page two"},
+            ]}})
         if parsed.path.endswith("/handler/get_audios"):
             return FakeHttpResponse({"audios": [{"id": "audio-secret"}]})
         raise AssertionError(f"Unexpected POST path: {parsed.path}")
@@ -235,7 +241,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert report["tenant"] == "uat"
     assert report["course_id"] == COURSE_KEY
     assert report["status"] == "pass"
-    assert report["pass_count"] == 7
+    assert report["pass_count"] == 8
     assert report["issue_count"] == 0
     assert report["unverified_count"] == 0
     assert report["course_findings"] == []
@@ -251,6 +257,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         "NLMCA-003",
         "NLMCA-004",
         "NLMCA-005",
+        "NLMCA-010",
         "NLMCA-008",
         "NLMCA-009",
     ]
@@ -258,12 +265,13 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert section["checks"][2]["actual"] == {"valid_file_count": 2, "total_count": 2}
     assert section["checks"][3]["actual"] == {"time_config_count": 2, "valid_file_count": 2}
     assert section["checks"][4]["actual"] == {"audio_binding_count": 1}
-    assert section["checks"][5]["actual"] == {
+    assert section["checks"][5]["actual"] == {"affected_page_count": 0, "marker_count": 0}
+    assert section["checks"][6]["actual"] == {
         "direct_child_count": 2,
         "imagesgallery_positions": [1],
         "first_child": {"position": 1, "category": "imagesgallery", "name": "课程讲解"},
     }
-    assert section["checks"][6]["actual"] == {
+    assert section["checks"][7]["actual"] == {
         "direct_child_count": 2,
         "summary_positions": [2],
         "last_child": {"position": 2, "category": "html", "name": "本节要点"},
@@ -280,6 +288,122 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         assert private_value not in report_text
 
 
+def test_saved_gallery_blockquote_prefixes_report_page_counts_and_section_link(tmp_path):
+    section_url = f"{FakeStudioReader.studio_base}/container/{VERTICAL}"
+    raw_subtitle = "> > confidential lesson text\n   > > > another private sentence\nA > B"
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {
+            "play_config": {
+                "time_config": [
+                    {"page": 1, "subtitle": raw_subtitle},
+                    {"page": 2, "subtitle": "  > quoted text"},
+                ]
+            }
+        }
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    section = report["target_sections"][0]
+    check = next(item for item in section["checks"] if item["check_id"] == "NLMCA-010")
+    report_text = json.dumps(report, ensure_ascii=False)
+    assert check["status"] == "issue"
+    assert check["evidence"]["affected_pages"] == [
+        {"page": 1, "marker_count": 5},
+        {"page": 2, "marker_count": 1},
+    ]
+    assert f"[Open Studio section]({section_url})" in check["evidence"]["summary"]
+    assert section["studio_url"] == section_url
+    section_checks = {item["check_id"]: item for item in section["checks"]}
+    assert [section_checks[check_id]["status"] for check_id in (
+        "NLMCA-003", "NLMCA-004", "NLMCA-005"
+    )] == ["pass", "pass", "pass"]
+    assert raw_subtitle not in report_text
+    assert "confidential lesson text" not in report_text
+
+
+def test_readable_saved_gallery_subtitles_without_prefixes_pass(tmp_path):
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {
+            "play_config": {
+                "time_config": [
+                    {"page": 1, "subtitle": "A > B"},
+                    {"page": 2, "subtitle": "A > B\n    > four-space indentation\n\t> tab indentation"},
+                ]
+            }
+        }
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    check = next(item for item in report["target_sections"][0]["checks"] if item["check_id"] == "NLMCA-010")
+    assert check["status"] == "pass"
+    assert check["actual"] == {"affected_page_count": 0, "marker_count": 0}
+    assert check["evidence"]["affected_pages"] == []
+
+
+@pytest.mark.parametrize("time_config", [
+    [],
+    [{"page": 1, "subtitle": ""}],
+    [{"page": 1, "subtitle": "   \n"}],
+    [{"page": 1, "subtitle": "private lesson text"}, {"page": 2}],
+    [{"page": 1, "subtitle": "private lesson text"}, "malformed entry"],
+    [{"page": 1, "subtitle": 17}],
+])
+def test_missing_or_malformed_saved_subtitles_are_unverified_without_stopping_gallery_checks(tmp_path, time_config):
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": {"play_config": {"time_config": time_config}}
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-010"]["status"] == "unverified"
+    assert checks["NLMCA-010"]["evidence"]["failure_category"] == "invalid_response"
+    assert checks["NLMCA-003"]["status"] == "pass"
+    assert checks["NLMCA-005"]["status"] == "pass"
+    assert "private lesson text" not in json.dumps(report, ensure_ascii=False)
+
+
+def test_unreadable_saved_subtitles_are_unverified_and_audio_binding_check_continues(tmp_path):
+    private_error = "get_play_config returned a private subtitle payload"
+    reader = FakeStudioReader(gallery_overrides={
+        "play_config": StudioReadError("get_play_config", private_error, 503)
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-010"]["status"] == "unverified"
+    assert checks["NLMCA-010"]["evidence"]["http_status"] == 503
+    assert checks["NLMCA-005"]["status"] == "pass"
+    assert private_error not in json.dumps(report, ensure_ascii=False)
+
+
 def test_confirmed_component_and_gallery_count_violations_are_issues(tmp_path):
     tree = course_tree_with_one_target()
     blocks = tree["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"][0]["child_info"]["children"]
@@ -293,7 +417,7 @@ def test_confirmed_component_and_gallery_count_violations_are_issues(tmp_path):
         course_tree=tree,
         gallery_overrides={
             "files": {"files": [{"id": "asset-1"}, {"id": "asset-2"}], "total_count": 3},
-            "play_config": {"play_config": {"time_config": [{"page": 1}]}},
+            "play_config": {"play_config": {"time_config": [{"page": 1, "subtitle": "Saved subtitle"}]}},
             "audios": {"audios": []},
         },
     )
@@ -311,8 +435,8 @@ def test_confirmed_component_and_gallery_count_violations_are_issues(tmp_path):
     assert checks[0]["actual"] == {"count": 2}
     assert checks[1]["status"] == "issue"
     assert checks[1]["actual"] == {"count": 2}
-    assert [check["status"] for check in checks[2:8]] == ["issue"] * 6
-    assert [check["status"] for check in checks[8:]] == ["pass", "pass"]
+    assert [check["status"] for check in checks[2:10]] == ["issue", "issue", "issue", "pass"] * 2
+    assert [check["status"] for check in checks[10:]] == ["pass", "pass"]
     assert report["status"] == "issue"
     assert report["issue_count"] == 8
     assert report["unverified_count"] == 0
@@ -501,10 +625,10 @@ def test_target_without_a_vertical_link_cannot_produce_section_issues(tmp_path):
 
     section = report["target_sections"][0]
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["unverified"] * 7
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 8
     assert report["status"] == "unverified"
     assert report["issue_count"] == 0
-    assert report["unverified_count"] == 7
+    assert report["unverified_count"] == 8
     assert reader.calls == [("get_course_structure", COURSE_KEY)]
 
 
@@ -573,7 +697,7 @@ def test_gallery_read_failure_keeps_independent_checks_running_and_redacts_error
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "pass", "pass", "pass"]
+    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "pass", "pass", "pass", "pass"]
     assert checks[2]["evidence"]["http_status"] == 503
     assert reader.calls == [
         ("get_course_structure", COURSE_KEY),
@@ -608,7 +732,7 @@ def test_confirmed_issue_takes_priority_over_independent_unverified_check_counts
     assert report["status"] == "issue"
     assert report["issue_count"] == 2
     assert report["unverified_count"] == 2
-    assert report["pass_count"] == 3
+    assert report["pass_count"] == 4
 
 
 def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp_path):
@@ -630,10 +754,10 @@ def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "unverified", "pass", "pass"]
+    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "unverified", "unverified", "pass", "pass"]
     assert report["status"] == "unverified"
-    assert report["unverified_count"] == 3
-    assert all(check["evidence"]["failure_category"] == "invalid_response" for check in checks[2:5])
+    assert report["unverified_count"] == 4
+    assert all(check["evidence"]["failure_category"] == "invalid_response" for check in checks[2:6])
     report_text = json.dumps(report, ensure_ascii=False)
     assert private_payload not in report_text
     assert "private-audio.mp3" not in report_text
@@ -659,7 +783,7 @@ def test_untrusted_block_locator_values_are_omitted_from_report_links(tmp_path):
     section = report["target_sections"][0]
     assert section["locator"] == ""
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["unverified"] * 7
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 8
     report_text = json.dumps(report, ensure_ascii=False)
     assert private_locator not in report_text
     assert "locator-secret" not in report_text
