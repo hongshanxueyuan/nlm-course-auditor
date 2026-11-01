@@ -20,6 +20,8 @@ TARGET_VERTICAL_NAME = "赋能内容"
 
 
 SUMMARY_COMPONENT_NAME = "本节要点"
+BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
+SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
 
 
 class StudioReader(Protocol):
@@ -237,7 +239,9 @@ def authenticated_read(studio_reader: StudioReader, stage: str, operation: Any) 
                 raise GlobalAuthenticationError(stage, refresh_status) from refresh_error
 
 
-def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[dict[str, Any]]:
+def gallery_checks(
+    studio_reader: StudioReader, gallery_locator: str, section_studio_url: str | None,
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     files: list[dict[str, Any]] | None = None
     total_count: int | None = None
@@ -295,7 +299,13 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
         else:
             config_failure = None
     except GlobalAuthenticationError as exc:
-        exc.completed_checks = list(checks)
+        subtitle_check = saved_subtitle_check(
+            None,
+            gallery_locator,
+            section_studio_url=section_studio_url,
+            config_failure=read_failure("get_play_config", exc),
+        )
+        exc.completed_checks = list(checks) + [subtitle_check]
         raise
     except Exception as exc:
         time_config = None
@@ -330,6 +340,13 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
             {"gallery_locator": gallery_locator, "time_config_count": config_count, "valid_file_count": file_count},
         ))
 
+    subtitle_check = saved_subtitle_check(
+        time_config if not config_failure else None,
+        gallery_locator,
+        section_studio_url=section_studio_url,
+        config_failure=config_failure,
+    )
+
     try:
         audio_payload = authenticated_read(
             studio_reader,
@@ -346,7 +363,7 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
         else:
             audio_failure = None
     except GlobalAuthenticationError as exc:
-        exc.completed_checks = list(checks)
+        exc.completed_checks = list(checks) + [subtitle_check]
         raise
     except Exception as exc:
         audios = None
@@ -367,7 +384,87 @@ def gallery_checks(studio_reader: StudioReader, gallery_locator: str) -> list[di
             {"audio_binding_count": 1}, {"audio_binding_count": audio_count},
             {"gallery_locator": gallery_locator, "audio_binding_count": audio_count},
         ))
+    checks.append(subtitle_check)
     return checks
+
+
+def saved_subtitle_check(
+    time_config: Any,
+    gallery_locator: str,
+    *,
+    section_studio_url: str | None,
+    config_failure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {"gallery_locator": gallery_locator}
+
+    def unverified_check(details: dict[str, Any]) -> dict[str, Any]:
+        evidence.update(details)
+        return check_result(
+            "NLMCA-010", "ImageGallery", SAVED_SUBTITLE_CHECK_NAME, "unverified",
+            {"all_subtitles_readable_without_blockquote_prefixes": True}, None, evidence,
+        )
+
+    if config_failure:
+        return unverified_check(config_failure)
+
+    if not isinstance(time_config, list) or not time_config:
+        return unverified_check({
+            "failure_stage": "get_play_config",
+            "failure_category": "invalid_response",
+            "summary": "Studio play_config.time_config has no readable subtitle records.",
+        })
+
+    page_counts: dict[int, int] = {}
+    for index, item in enumerate(time_config, start=1):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("subtitle"), str)
+            or not item["subtitle"].strip()
+        ):
+            return unverified_check({
+                "failure_stage": "get_play_config",
+                "failure_category": "invalid_response",
+                "summary": "Studio play_config.time_config has one or more missing or unreadable subtitle values.",
+            })
+        page = item.get("page")
+        page_number = page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else index
+        marker_count = sum(match.group(0).count(">") for match in BLOCKQUOTE_PREFIX_RE.finditer(item["subtitle"]))
+        if marker_count:
+            page_counts[page_number] = page_counts.get(page_number, 0) + marker_count
+
+    affected_pages = [
+        {"page": page, "marker_count": marker_count}
+        for page, marker_count in sorted(page_counts.items())
+    ]
+    marker_total = sum(page_counts.values())
+    if marker_total:
+        summary = (
+            f"Saved Gallery subtitle text contains {marker_total} line-leading Markdown blockquote marker(s) "
+            f"on {len(affected_pages)} page(s). This check does not inspect existing MP3 audio."
+        )
+        if section_studio_url:
+            summary += f" [Open Studio section]({section_studio_url})"
+        evidence.update({
+            "affected_pages": affected_pages,
+            "total_marker_count": marker_total,
+            "summary": summary,
+        })
+        return check_result(
+            "NLMCA-010", "ImageGallery", SAVED_SUBTITLE_CHECK_NAME, "issue",
+            {"all_subtitles_readable_without_blockquote_prefixes": True},
+            {"affected_page_count": len(affected_pages), "marker_count": marker_total}, evidence,
+        )
+
+    evidence.update({
+        "affected_pages": [],
+        "total_marker_count": 0,
+        "summary": "Every saved Gallery subtitle was readable; no line-leading Markdown blockquote prefixes were found.",
+    })
+    return check_result(
+        "NLMCA-010", "ImageGallery", SAVED_SUBTITLE_CHECK_NAME, "pass",
+        {"all_subtitles_readable_without_blockquote_prefixes": True},
+        {"affected_page_count": 0, "marker_count": 0}, evidence,
+    )
 
 
 def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> list[dict[str, Any]]:
@@ -394,6 +491,7 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                 ("NLMCA-003", "ImageGallery", "Gallery file count matches total_count", "Valid file-record count equals Studio total_count"),
                 ("NLMCA-004", "ImageGallery", "Timing-entry count matches valid files", {"time_config_count_equals_valid_file_count": True}),
                 ("NLMCA-005", "ImageGallery", "Gallery has exactly one audio binding", {"audio_binding_count": 1}),
+                ("NLMCA-010", "ImageGallery", SAVED_SUBTITLE_CHECK_NAME, {"all_subtitles_readable_without_blockquote_prefixes": True}),
                 ("NLMCA-008", "组件顺序", "ImageGallery 位于目标小节首位", {"first_child_category": "imagesgallery"}),
                 ("NLMCA-009", "组件顺序", "“本节要点”位于目标小节末尾", {"last_child_category": "html", "last_child_name": SUMMARY_COMPONENT_NAME}),
             )
@@ -473,11 +571,16 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                     ("NLMCA-003", "Gallery file count matches total_count", "Valid file-record count equals Studio total_count"),
                     ("NLMCA-004", "Timing-entry count matches valid files", {"time_config_count_equals_valid_file_count": True}),
                     ("NLMCA-005", "Gallery has exactly one audio binding", {"audio_binding_count": 1}),
+                    ("NLMCA-010", SAVED_SUBTITLE_CHECK_NAME, {"all_subtitles_readable_without_blockquote_prefixes": True}),
                 )
             ])
             continue
         try:
-            gallery_data_checks.extend(gallery_checks(studio_reader, gallery_locator))
+            gallery_data_checks.extend(gallery_checks(
+                studio_reader,
+                gallery_locator,
+                vertical_studio_url(studio_reader.studio_base, vertical_locator),
+            ))
         except GlobalAuthenticationError as exc:
             exc.completed_checks = (
                 checks
