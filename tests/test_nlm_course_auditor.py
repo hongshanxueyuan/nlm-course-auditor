@@ -241,7 +241,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert report["tenant"] == "uat"
     assert report["course_id"] == COURSE_KEY
     assert report["status"] == "pass"
-    assert report["pass_count"] == 9
+    assert report["pass_count"] == 10
     assert report["issue_count"] == 0
     assert report["unverified_count"] == 0
     assert report["course_findings"] == []
@@ -259,6 +259,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         "NLMCA-005",
         "NLMCA-010",
         "NLMCA-011",
+        "NLMCA-012",
         "NLMCA-008",
         "NLMCA-009",
     ]
@@ -270,11 +271,16 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert section["checks"][5]["actual"] == {"affected_page_count": 0, "marker_count": 0}
     assert section["checks"][6]["actual"] == {"eligible_page_count": 2, "affected_page_count": 0}
     assert section["checks"][7]["actual"] == {
+        "eligible_page_count": 2,
+        "affected_page_count": 0,
+        "unrecognized_bold_count": 0,
+    }
+    assert section["checks"][8]["actual"] == {
         "direct_child_count": 2,
         "imagesgallery_positions": [1],
         "first_child": {"position": 1, "category": "imagesgallery", "name": "课程讲解"},
     }
-    assert section["checks"][8]["actual"] == {
+    assert section["checks"][9]["actual"] == {
         "direct_child_count": 2,
         "summary_positions": [2],
         "last_child": {"position": 2, "category": "html", "name": "本节要点"},
@@ -377,10 +383,16 @@ def test_saved_gallery_blockquote_prefixes_report_page_counts_and_section_link(t
             "play_config": {
                 "time_config": [
                     {"page": 1, "subtitle": raw_subtitle},
-                    {"page": 2, "subtitle": "  > quoted text"},
+                    {"page": 2, "subtitle": "&gt; &gt quoted text"},
+                    {"page": 3, "subtitle": "   &gt; > &#62; &#x3E; quoted text"},
+                    {"page": 4, "subtitle": "    &gt; indented text\nA &gt; B\n&amp;gt;"},
                 ]
             }
-        }
+        },
+        "files": {
+            "files": [{"id": f"asset-{index}"} for index in range(1, 5)],
+            "total_count": 4,
+        },
     })
 
     report = audit_course(
@@ -397,8 +409,10 @@ def test_saved_gallery_blockquote_prefixes_report_page_counts_and_section_link(t
     assert check["status"] == "issue"
     assert check["evidence"]["affected_pages"] == [
         {"page": 1, "marker_count": 5},
-        {"page": 2, "marker_count": 1},
+        {"page": 2, "marker_count": 2},
+        {"page": 3, "marker_count": 4},
     ]
+    assert check["evidence"]["total_marker_count"] == 11
     assert f"[Open Studio section]({section_url})" in check["evidence"]["summary"]
     assert section["studio_url"] == section_url
     section_checks = {item["check_id"]: item for item in section["checks"]}
@@ -407,6 +421,9 @@ def test_saved_gallery_blockquote_prefixes_report_page_counts_and_section_link(t
     )] == ["pass", "pass", "pass"]
     assert raw_subtitle not in report_text
     assert "confidential lesson text" not in report_text
+    assert json.loads(
+        (tmp_path / "auditor" / COURSE_KEY.replace(":", "_") / "report.json").read_text(encoding="utf-8")
+    ) == report
 
 
 def test_readable_saved_gallery_subtitles_without_prefixes_pass(tmp_path):
@@ -433,6 +450,64 @@ def test_readable_saved_gallery_subtitles_without_prefixes_pass(tmp_path):
     assert check["status"] == "pass"
     assert check["actual"] == {"affected_page_count": 0, "marker_count": 0}
     assert check["evidence"]["affected_pages"] == []
+
+
+def test_saved_subtitle_bold_candidates_use_commonmark_and_keep_report_private(tmp_path):
+    section_url = f"{FakeStudioReader.studio_base}/container/{VERTICAL}"
+    raw_subtitles = [
+        "** 未识别 **",
+        "正文** 未闭合",
+        "中文前文**加粗重点**，中文后文以及****嵌套格式****",
+        r"字面量 \*\*，行内 `**code**`，以及：" "\n```md\n**fenced code**\n```",
+        "one ** two ** three",
+    ]
+    reader = FakeStudioReader(gallery_overrides={
+        "files": {
+            "files": [{"id": f"asset-{index}"} for index in range(1, len(raw_subtitles) + 1)],
+            "total_count": len(raw_subtitles),
+        },
+        "play_config": {"play_config": {"time_config": [
+            {"page": page, "subtitle": subtitle}
+            for page, subtitle in zip((3, 4, 5, 6, 7), raw_subtitles)
+        ]}},
+    })
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    section = report["target_sections"][0]
+    checks = {item["check_id"]: item for item in section["checks"]}
+    check = checks["NLMCA-012"]
+    assert check["status"] == "issue"
+    assert check["actual"] == {
+        "eligible_page_count": 5,
+        "affected_page_count": 3,
+        "unrecognized_bold_count": 5,
+    }
+    assert check["evidence"]["gallery_locator"] == GALLERY
+    assert check["evidence"]["affected_pages"] == [
+        {"page": 3, "unrecognized_bold_count": 2},
+        {"page": 4, "unrecognized_bold_count": 1},
+        {"page": 7, "unrecognized_bold_count": 2},
+    ]
+    assert f"[Open Studio section]({section_url})" in check["evidence"]["summary"]
+    assert checks["NLMCA-010"]["status"] == "pass"
+    assert [checks[check_id]["status"] for check_id in ("NLMCA-003", "NLMCA-004", "NLMCA-005")] == [
+        "pass", "pass", "pass"
+    ]
+    saved_report = json.loads(
+        (tmp_path / "auditor" / COURSE_KEY.replace(":", "_") / "report.json").read_text(encoding="utf-8")
+    )
+    report_text = json.dumps(saved_report, ensure_ascii=False)
+    assert saved_report == report
+    assert all(subtitle not in report_text for subtitle in raw_subtitles)
+    assert "未识别" not in report_text
+    assert "fenced code" not in report_text
 
 
 def test_paragraph_before_markdown_heading_is_reported_without_subtitle_text(tmp_path, capsys):
@@ -632,6 +707,12 @@ def test_missing_or_malformed_saved_subtitles_are_unverified_without_stopping_ga
         "eligible_page_count": eligible_page_count,
         "affected_page_count": 0,
     }
+    assert checks["NLMCA-012"]["status"] == "pass"
+    assert checks["NLMCA-012"]["actual"] == {
+        "eligible_page_count": eligible_page_count,
+        "affected_page_count": 0,
+        "unrecognized_bold_count": 0,
+    }
     assert checks["NLMCA-003"]["status"] == "pass"
     assert checks["NLMCA-005"]["status"] == "pass"
     assert "operator_hint" not in checks["NLMCA-004"]
@@ -657,6 +738,8 @@ def test_unreadable_saved_subtitles_are_unverified_and_audio_binding_check_conti
     assert checks["NLMCA-010"]["evidence"]["http_status"] == 503
     assert checks["NLMCA-011"]["status"] == "pass"
     assert checks["NLMCA-011"]["actual"]["eligible_page_count"] == 0
+    assert checks["NLMCA-012"]["status"] == "pass"
+    assert checks["NLMCA-012"]["actual"]["eligible_page_count"] == 0
     assert checks["NLMCA-005"]["status"] == "pass"
     assert "operator_hint" not in checks["NLMCA-004"]
     assert private_error not in json.dumps(report, ensure_ascii=False)
@@ -685,6 +768,8 @@ def test_readable_subtitles_are_checked_when_other_pages_are_malformed(tmp_path)
     assert checks["NLMCA-011"]["evidence"]["affected_pages"] == [
         {"page": 6, "opening_block": "paragraph", "later_heading_count": 1}
     ]
+    assert checks["NLMCA-012"]["status"] == "pass"
+    assert checks["NLMCA-012"]["actual"]["eligible_page_count"] == 1
     assert report["status"] == "issue"
     assert report["issue_count"] == 1
     assert report["unverified_count"] == 1
@@ -721,8 +806,8 @@ def test_confirmed_component_and_gallery_count_violations_are_issues(tmp_path):
     assert checks[0]["actual"] == {"count": 2}
     assert checks[1]["status"] == "issue"
     assert checks[1]["actual"] == {"count": 2}
-    assert [check["status"] for check in checks[2:12]] == ["issue", "issue", "issue", "pass", "pass"] * 2
-    assert [check["status"] for check in checks[12:]] == ["pass", "pass"]
+    assert [check["status"] for check in checks[2:14]] == ["issue", "issue", "issue", "pass", "pass", "pass"] * 2
+    assert [check["status"] for check in checks[14:]] == ["pass", "pass"]
     assert all("operator_hint" not in checks[index] for index in (2, 3, 6, 7))
     assert report["status"] == "issue"
     assert report["issue_count"] == 8
@@ -912,10 +997,10 @@ def test_target_without_a_vertical_link_cannot_produce_section_issues(tmp_path):
 
     section = report["target_sections"][0]
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["unverified"] * 8 + ["pass"]
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 9 + ["pass"]
     assert report["status"] == "unverified"
     assert report["issue_count"] == 0
-    assert report["unverified_count"] == 8
+    assert report["unverified_count"] == 9
     assert reader.calls == [("get_course_structure", COURSE_KEY)]
 
 
@@ -984,7 +1069,7 @@ def test_gallery_read_failure_keeps_independent_checks_running_and_redacts_error
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "pass", "pass", "pass", "pass", "pass"]
+    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "pass", "pass", "pass", "pass", "pass", "pass"]
     assert checks[2]["evidence"]["http_status"] == 503
     assert reader.calls == [
         ("get_course_structure", COURSE_KEY),
@@ -1019,7 +1104,7 @@ def test_confirmed_issue_takes_priority_over_independent_unverified_check_counts
     assert report["status"] == "issue"
     assert report["issue_count"] == 2
     assert report["unverified_count"] == 2
-    assert report["pass_count"] == 5
+    assert report["pass_count"] == 6
 
 
 def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp_path):
@@ -1041,7 +1126,7 @@ def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp
     )
 
     checks = report["target_sections"][0]["checks"]
-    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "unverified", "unverified", "pass", "pass", "pass"]
+    assert [check["status"] for check in checks] == ["pass", "pass", "unverified", "unverified", "unverified", "unverified", "pass", "pass", "pass", "pass"]
     assert report["status"] == "unverified"
     assert report["unverified_count"] == 4
     assert all(check["evidence"]["failure_category"] == "invalid_response" for check in checks[2:6])
@@ -1070,7 +1155,7 @@ def test_untrusted_block_locator_values_are_omitted_from_report_links(tmp_path):
     section = report["target_sections"][0]
     assert section["locator"] == ""
     assert section["studio_url"] is None
-    assert [check["status"] for check in section["checks"]] == ["unverified"] * 8 + ["pass"]
+    assert [check["status"] for check in section["checks"]] == ["unverified"] * 9 + ["pass"]
     report_text = json.dumps(report, ensure_ascii=False)
     assert private_locator not in report_text
     assert "locator-secret" not in report_text

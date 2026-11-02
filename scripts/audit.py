@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -27,6 +28,7 @@ INVALID_TIME_CONFIG_HINT = "大概率是 imagegallery 的音频字幕未成功�
 BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
 SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
 SUBTITLE_HEADING_ORDER_CHECK_NAME = "Readable Gallery subtitles begin with a paragraph before any Markdown heading"
+SUBTITLE_BOLD_CHECK_NAME = "Saved Gallery subtitles use CommonMark-recognized bold delimiters"
 SUBTITLE_HEADING_ORDER_HINT = "大概率是 AI 段落划分不准确。"
 SUBTITLE_HEADING_ORDER_EXPECTED = {"first_content_block": "paragraph", "later_markdown_heading": True}
 SUBTITLE_MARKDOWN = MarkdownIt("commonmark").enable("table")
@@ -326,7 +328,8 @@ def gallery_checks(
             gallery_locator,
             section_studio_url=section_studio_url,
         )
-        exc.completed_checks = list(checks) + [subtitle_check, heading_order_check]
+        bold_check = subtitle_bold_check(None, gallery_locator, section_studio_url=section_studio_url)
+        exc.completed_checks = list(checks) + [subtitle_check, heading_order_check, bold_check]
         raise
     except Exception as exc:
         time_config = None
@@ -374,6 +377,11 @@ def gallery_checks(
         gallery_locator,
         section_studio_url=section_studio_url,
     )
+    bold_check = subtitle_bold_check(
+        time_config if not config_failure else None,
+        gallery_locator,
+        section_studio_url=section_studio_url,
+    )
 
     try:
         audio_payload = authenticated_read(
@@ -391,7 +399,7 @@ def gallery_checks(
         else:
             audio_failure = None
     except GlobalAuthenticationError as exc:
-        exc.completed_checks = list(checks) + [subtitle_check, heading_order_check]
+        exc.completed_checks = list(checks) + [subtitle_check, heading_order_check, bold_check]
         raise
     except Exception as exc:
         audios = None
@@ -414,6 +422,7 @@ def gallery_checks(
         ))
     checks.append(subtitle_check)
     checks.append(heading_order_check)
+    checks.append(bold_check)
     return checks
 
 
@@ -456,7 +465,8 @@ def saved_subtitle_check(
                 "summary": "Studio play_config.time_config has one or more missing or unreadable subtitle values.",
             })
         page_number = subtitle_page_number(item, index)
-        marker_count = sum(match.group(0).count(">") for match in BLOCKQUOTE_PREFIX_RE.finditer(item["subtitle"]))
+        decoded_subtitle = html.unescape(item["subtitle"])
+        marker_count = sum(match.group(0).count(">") for match in BLOCKQUOTE_PREFIX_RE.finditer(decoded_subtitle))
         if marker_count:
             page_counts[page_number] = page_counts.get(page_number, 0) + marker_count
 
@@ -573,6 +583,121 @@ def subtitle_heading_order_check(
     )
 
 
+def unescaped_bold_candidate_count(markdown: str) -> int:
+    candidate_count = 0
+    index = 0
+    while index < len(markdown):
+        if markdown[index] == "\\":
+            index += 2
+            continue
+        if markdown[index] == "`":
+            run_end = index + 1
+            while run_end < len(markdown) and markdown[run_end] == "`":
+                run_end += 1
+            run_length = run_end - index
+            closing_index = run_end
+            while closing_index < len(markdown):
+                if markdown[closing_index] == "\\":
+                    closing_index += 2
+                    continue
+                if markdown[closing_index] == "`":
+                    closing_end = closing_index + 1
+                    while closing_end < len(markdown) and markdown[closing_end] == "`":
+                        closing_end += 1
+                    if closing_end - closing_index == run_length:
+                        index = closing_end
+                        break
+                    closing_index = closing_end
+                    continue
+                closing_index += 1
+            else:
+                index = run_end
+            continue
+        if markdown.startswith("**", index):
+            run_end = index + 2
+            while run_end < len(markdown) and markdown[run_end] == "*":
+                run_end += 1
+            candidate_count += (run_end - index) // 2
+            index = run_end
+            continue
+        index += 1
+    return candidate_count
+
+
+def markdown_bold_delimiter_counts(markdown: str) -> tuple[int, int]:
+    candidate_count = 0
+    recognized_count = 0
+    for token in SUBTITLE_MARKDOWN.parse(markdown):
+        if token.type != "inline":
+            continue
+        candidate_count += unescaped_bold_candidate_count(token.content)
+        recognized_count += sum(
+            child.type in {"strong_open", "strong_close"} and child.markup == "**"
+            for child in token.children or []
+        )
+    return candidate_count, recognized_count
+
+
+def subtitle_bold_check(
+    time_config: Any,
+    gallery_locator: str,
+    *,
+    section_studio_url: str | None,
+) -> dict[str, Any]:
+    eligible_count = 0
+    affected_pages: dict[int, int] = {}
+    if isinstance(time_config, list):
+        for index, item in enumerate(time_config, start=1):
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("subtitle"), str)
+                or not item["subtitle"].strip()
+            ):
+                continue
+            eligible_count += 1
+            candidate_count, recognized_count = markdown_bold_delimiter_counts(item["subtitle"])
+            unrecognized_count = candidate_count - recognized_count
+            if unrecognized_count > 0:
+                page_number = subtitle_page_number(item, index)
+                affected_pages[page_number] = affected_pages.get(page_number, 0) + unrecognized_count
+
+    affected = [
+        {"page": page, "unrecognized_bold_count": count}
+        for page, count in sorted(affected_pages.items())
+    ]
+    affected_count = len(affected)
+    unrecognized_total = sum(affected_pages.values())
+    if affected_count:
+        page_list = ", ".join(str(item["page"]) for item in affected)
+        summary = (
+            f"CommonMark did not recognize {unrecognized_total} unescaped ** candidate(s) as strong delimiters "
+            f"on {affected_count} of {eligible_count} readable subtitle page(s): page {page_list}."
+        )
+        if section_studio_url:
+            summary += f" [Open Studio section]({section_studio_url})"
+    else:
+        summary = "Every readable saved Gallery subtitle page has CommonMark-recognized bold delimiters."
+    evidence = {
+        "gallery_locator": gallery_locator,
+        "eligible_page_count": eligible_count,
+        "affected_pages": affected,
+        "affected_page_count": affected_count,
+        "unrecognized_bold_count": unrecognized_total,
+        "summary": summary,
+    }
+    return check_result(
+        "NLMCA-012", "ImageGallery", SUBTITLE_BOLD_CHECK_NAME,
+        "issue" if affected_count else "pass",
+        {"all_unescaped_double_asterisk_candidates_form_strong_tokens": True},
+        {
+            "eligible_page_count": eligible_count,
+            "affected_page_count": affected_count,
+            "unrecognized_bold_count": unrecognized_total,
+        },
+        evidence,
+    )
+
+
 def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> list[dict[str, Any]]:
     vertical_locator = vertical_locator_of(vertical)
     if not vertical_locator:
@@ -598,6 +723,7 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                 ("NLMCA-004", "ImageGallery", "Timing-entry count matches valid files", {"time_config_count_equals_valid_file_count": True}),
                 ("NLMCA-005", "ImageGallery", "Gallery has exactly one audio binding", {"audio_binding_count": 1}),
                 ("NLMCA-010", "ImageGallery", SAVED_SUBTITLE_CHECK_NAME, {"all_subtitles_readable_without_blockquote_prefixes": True}),
+                ("NLMCA-012", "ImageGallery", SUBTITLE_BOLD_CHECK_NAME, {"all_unescaped_double_asterisk_candidates_form_strong_tokens": True}),
                 ("NLMCA-008", "组件顺序", "ImageGallery 位于目标小节首位", {"first_child_category": "imagesgallery"}),
                 ("NLMCA-009", "组件顺序", "“本节要点”位于目标小节末尾", {"last_child_category": "html", "last_child_name": SUMMARY_COMPONENT_NAME}),
             )
@@ -684,9 +810,15 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
                     ("NLMCA-004", "Timing-entry count matches valid files", {"time_config_count_equals_valid_file_count": True}),
                     ("NLMCA-005", "Gallery has exactly one audio binding", {"audio_binding_count": 1}),
                     ("NLMCA-010", SAVED_SUBTITLE_CHECK_NAME, {"all_subtitles_readable_without_blockquote_prefixes": True}),
+                    ("NLMCA-012", SUBTITLE_BOLD_CHECK_NAME, {"all_unescaped_double_asterisk_candidates_form_strong_tokens": True}),
                 )
             ])
             gallery_data_checks.append(subtitle_heading_order_check(
+                None,
+                gallery_locator,
+                section_studio_url=vertical_studio_url(studio_reader.studio_base, vertical_locator),
+            ))
+            gallery_data_checks.append(subtitle_bold_check(
                 None,
                 gallery_locator,
                 section_studio_url=vertical_studio_url(studio_reader.studio_base, vertical_locator),
