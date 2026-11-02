@@ -44,15 +44,15 @@ disable-model-invocation: true
 
 ## 只读边界和检查范围
 
-整课课程树会单独扫描所有 `sequential` 小节的正式发布状态，不限于包含“赋能内容”的小节。只有 `published=true` 且 `has_changes=false` 才能确认当前编辑已发布；明确未发布或仍有未发布改动时记为问题，必要字段缺失或无效时无法确认。报告为每个 sequential 小节保留一条结果和 Studio 直达链接。
+整课课程树会单独扫描所有 `sequential` 小节的正式发布状态，不限于包含“赋能内容”的小节。结构树和发布元数据从两次不同格式的 `GET /course/{course_id}` 分开读取：`format=concise` 响应用于完整结构树、目标发现和课程快照；默认格式响应只用于读取发布字段，并按 sequential locator 与结构树匹配。只有 `published=true` 且 `has_changes=false` 才能确认当前编辑已发布；明确未发布或仍有未发布改动时记为问题，必要字段缺失或无效时无法确认。报告为每个 sequential 小节保留一条结果和 Studio 直达链接。
 
-每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}`，读取包含小节发布元数据的完整课程结构，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程树。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
+每轮审核读取一次 `GET /course/{course_id}?format=concise` 作为完整结构树，并读取一次默认格式的 `GET /course/{course_id}` 作为发布元数据来源。默认格式响应不参与结构完整性校验；若该请求读取失败，发布状态检查记为无法确认，其他检查继续。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程数据。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
 
 审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，且它是第一个直接子组件；也必须恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件，且它是最后一个直接子组件。中间的直接子组件不受顺序限制，更深层的后代组件不参与这些检查。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数、音频绑定数是否为 1，扫描保存字幕中开头为 `>` 的大于号；检查可读字幕中的加粗格式是否识别成功（由 CommonMark 解析器判定）；并检查正文段落是否先于 Markdown 标题。NLMCA-004 和 NLMCA-011 在命中时会附带运营排查提示；提示不改变检查结果或证据。稳定 ID 和通过标准见 [CHECKLIST.md](references/CHECKLIST.md)。
 
 验证目标前，必须先确认其 locator 是有效的 `type@vertical`。如果课程树中缺少有效 vertical locator，该目标的检查记为 `unverified`，Studio 链接留空，并跳过 Gallery 读取。每条目标小节存在的结构问题都会包含该 vertical 的 Studio 直达链接。
 
-读取失败或 handler 响应格式无效时，结果为 `unverified`；确认的数量或组件不匹配时，结果为 `issue`。本地 Gallery 读取失败只会让依赖该读取的检查成为 `unverified`，其他独立检查会继续。认证失败最多刷新四次；认证重试后仍失败或课程结构读取失败时，整轮审核停止，并增加课程级 `NLMCA-007` `unverified`。若课程树读取成功但没有匹配的 vertical，则记录课程级 `NLMCA-006` `issue`，目标数为 0，并提示运营核对租户、课程或命名规则。目标数为 0 时不会虚构小节检查。
+读取失败或 handler 响应格式无效时，结果为 `unverified`；确认的数量或组件不匹配时，结果为 `issue`。本地 Gallery 读取失败只会让依赖该读取的检查成为 `unverified`，其他独立检查会继续。默认格式发布元数据读取失败时，只将每个 sequential 发布状态标为 `unverified`，结构审核继续；认证失败最多刷新四次，认证重试后仍失败会停止后续读取，并增加课程级 `NLMCA-007` `unverified`。课程结构读取失败时也会停止审核。若课程树读取成功但没有匹配的 vertical，则记录课程级 `NLMCA-006` `issue`，目标数为 0，并提示运营核对租户、课程或命名规则。目标数为 0 时不会虚构小节检查。
 
 ## 产物与报告
 

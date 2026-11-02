@@ -45,6 +45,8 @@ class StudioReader(Protocol):
 
     def get_course_structure(self, course_id: str) -> Any: ...
 
+    def get_course_publication_structure(self, course_id: str) -> Any: ...
+
     def get_files(self, gallery_locator: str) -> Any: ...
 
     def get_play_config(self, gallery_locator: str) -> Any: ...
@@ -162,7 +164,33 @@ def sequential_studio_url(studio_base: str, locator: str) -> str | None:
     return f"{studio_base.rstrip('/')}/container/{locator}"
 
 
-def sequential_publication_check(section: dict[str, Any]) -> dict[str, Any]:
+def sequential_publication_check(
+    section: dict[str, Any],
+    publication_read_failure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if publication_read_failure:
+        evidence: dict[str, Any] = {
+            "failure_stage": publication_read_failure.get(
+                "failure_stage", "course_publication_structure"
+            ),
+            "failure_category": publication_read_failure.get("failure_category", "read_failure"),
+            "summary": publication_read_failure.get(
+                "summary", "Studio course publication state could not be read."
+            ),
+        }
+        http_status = publication_read_failure.get("http_status")
+        if isinstance(http_status, int) and not isinstance(http_status, bool):
+            evidence["http_status"] = http_status
+        return {
+            "check_id": "NLMCA-013",
+            "category": "小节发布状态",
+            "name": SEQUENTIAL_PUBLICATION_CHECK_NAME,
+            "status": "unverified",
+            "expected": {"published": True, "has_changes": False},
+            "actual": {},
+            "evidence": evidence,
+        }
+
     published = section.get("published")
     has_changes = section.get("has_changes")
     visibility_state = section.get("visibility_state")
@@ -232,17 +260,42 @@ def sequential_publication_check(section: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sequential_section_records(course_tree: Any, studio_base: str) -> list[dict[str, Any]]:
+def sequential_publication_sections(course_tree: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(course_tree, dict):
+        return {}
+    sections_by_locator: dict[str, dict[str, Any]] = {}
+    duplicate_locators: set[str] = set()
+    for section in find_sequential_sections(course_tree):
+        locator = locator_of(section)
+        if not SEQUENTIAL_LOCATOR_PATTERN.fullmatch(locator):
+            continue
+        if locator in sections_by_locator:
+            duplicate_locators.add(locator)
+        else:
+            sections_by_locator[locator] = section
+    for locator in duplicate_locators:
+        sections_by_locator.pop(locator, None)
+    return sections_by_locator
+
+
+def sequential_section_records(
+    course_tree: Any,
+    studio_base: str,
+    publication_tree: Any = None,
+    publication_read_failure: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    publication_sections = sequential_publication_sections(publication_tree)
     records = []
     for section in find_sequential_sections(course_tree):
         locator = locator_of(section)
         if not SEQUENTIAL_LOCATOR_PATTERN.fullmatch(locator):
             locator = ""
+        publication_section = publication_sections.get(locator, {}) if locator else {}
         records.append({
             "name": display_name_of(section),
             "locator": locator,
             "studio_url": sequential_studio_url(studio_base, locator) if locator else None,
-            "checks": [sequential_publication_check(section)],
+            "checks": [sequential_publication_check(publication_section, publication_read_failure)],
         })
     return records
 
@@ -1104,8 +1157,43 @@ def audit_course(
             output_dir=output_dir,
             output=output,
         )
-    sequential_sections = sequential_section_records(course_tree, studio_reader.studio_base)
     atomic_write_json(output_dir / "course-structure.json", course_tree)
+
+    publication_tree = None
+    publication_read_failure = None
+    try:
+        publication_tree = authenticated_read(
+            studio_reader,
+            "course_publication_structure",
+            lambda: studio_reader.get_course_publication_structure(course_id),
+        )
+    except GlobalAuthenticationError as exc:
+        publication_read_failure = read_failure("course_publication_structure", exc)
+        sequential_sections = sequential_section_records(
+            course_tree,
+            studio_reader.studio_base,
+            publication_read_failure=publication_read_failure,
+        )
+        finding = stopped_finding("authentication", "authentication_failure", exc.http_status)
+        return write_report(
+            tenant=tenant,
+            course_id=course_id,
+            audited_at=audited_at,
+            target_sections=[],
+            course_findings=[finding],
+            sequential_sections=sequential_sections,
+            output_dir=output_dir,
+            output=output,
+        )
+    except Exception as exc:
+        publication_read_failure = read_failure("course_publication_structure", exc)
+
+    sequential_sections = sequential_section_records(
+        course_tree,
+        studio_reader.studio_base,
+        publication_tree=publication_tree,
+        publication_read_failure=publication_read_failure,
+    )
 
     target_sections: list[dict[str, Any]] = []
     for vertical in find_target_verticals(course_tree):
