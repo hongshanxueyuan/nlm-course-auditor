@@ -15,6 +15,14 @@
 
 所有目标检查都要求有效的 `type@vertical` locator。如果 locator 缺失，该目标的检查记为 `unverified`，Studio 链接留空，并跳过 Gallery 读取；每条目标小节结构问题都包含 vertical 直达链接。
 
+## Sequential 小节发布状态
+
+| ID | 检查项 | 范围 | 规则 | 通过标准 |
+| --- | --- | --- | --- | --- |
+| NLMCA-013 | 当前 Sequential 小节内容已发布 | 整门课程中的每个 `sequential` 节点，不限于含有“赋能内容”的小节 | 从完整 Studio 课程结构读取 `published`、`has_changes` 和可用的 `visibility_state`；`released_to_students` 不参与判断 | `published=true` 且 `has_changes=false` 时通过；`published=false`、`has_changes=true` 或 `visibility_state=needs_attention` 时记为问题；必要状态字段缺失或无效时无法确认 |
+
+每个 sequential 小节都保留独立检查结果和安全的 Studio 直达链接。状态问题可以通过其他小节检查继续输出；课程状态和统计包含这些结果。
+
 ## ImageGallery 数据
 
 | ID | 检查项 | 范围 | 规则 | 通过标准 |

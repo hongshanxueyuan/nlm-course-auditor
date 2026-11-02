@@ -189,7 +189,6 @@ class StudioApiReader:
         try:
             response = self.session.get(
                 f"{self.studio_base}/course/{course_id}",
-                params={"format": "concise"},
                 headers={"Accept": "application/json, text/plain, */*"},
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
