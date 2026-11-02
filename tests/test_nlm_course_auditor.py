@@ -458,7 +458,7 @@ def test_saved_subtitle_bold_candidates_use_commonmark_and_keep_report_private(t
         "** 未识别 **",
         "正文** 未闭合",
         "中文前文**加粗重点**，中文后文以及****嵌套格式****",
-        r"字面量 \*\*，行内 `**code**`，以及：" "\n```md\n**fenced code**\n```",
+        r"字面量 \*\*，行内 `**code**` 和 `**\`，以及：" "\n```md\n**fenced code**\n```",
         "one ** two ** three",
     ]
     reader = FakeStudioReader(gallery_overrides={
