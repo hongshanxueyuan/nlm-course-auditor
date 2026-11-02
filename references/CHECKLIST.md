@@ -19,7 +19,7 @@
 
 | ID | 检查项 | 范围 | 规则 | 通过标准 |
 | --- | --- | --- | --- | --- |
-| NLMCA-013 | 当前 Sequential 小节内容已发布 | 整门课程中的每个 `sequential` 节点，不限于含有“赋能内容”的小节 | 从完整 Studio 课程结构读取 `published`、`has_changes` 和可用的 `visibility_state`；`released_to_students` 不参与判断 | `published=true` 且 `has_changes=false` 时通过；`published=false`、`has_changes=true` 或 `visibility_state=needs_attention` 时记为问题；必要状态字段缺失或无效时无法确认 |
+| NLMCA-013 | 当前 Sequential 小节内容已发布 | 整门课程中的每个 `sequential` 节点，不限于含有“赋能内容”的小节 | 从默认格式的 Studio 课程响应读取 `published`、`has_changes` 和可用的 `visibility_state`，并按 sequential locator 与完整结构树匹配；`released_to_students` 不参与判断 | `published=true` 且 `has_changes=false` 时通过；`published=false`、`has_changes=true` 或 `visibility_state=needs_attention` 时记为问题；必要状态字段缺失或无效时无法确认 |
 
 每个 sequential 小节都保留独立检查结果和安全的 Studio 直达链接。状态问题可以通过其他小节检查继续输出；课程状态和统计包含这些结果。
 

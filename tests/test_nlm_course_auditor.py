@@ -1,3 +1,4 @@
+import copy
 import json
 from urllib.parse import urlparse
 import pytest
@@ -14,8 +15,19 @@ GALLERY = "block-v1:FIRAx+1040663+20261018+type@imagesgallery+block@gallery1"
 class FakeStudioReader:
     studio_base = "https://studio.example.test"
 
-    def __init__(self, *, course_tree=None, gallery_overrides=None, course_error=None):
+    def __init__(
+        self,
+        *,
+        course_tree=None,
+        publication_tree=None,
+        publication_error=None,
+        gallery_overrides=None,
+        course_error=None,
+    ):
         self.course_tree = course_tree or course_tree_with_one_target()
+        self.publication_tree = publication_tree if publication_tree is not None else self.course_tree
+        self.publication_error = publication_error
+        self.publication_calls = []
         self.gallery_overrides = gallery_overrides or {}
         self.course_error = course_error
         self.calls = []
@@ -25,6 +37,12 @@ class FakeStudioReader:
         if self.course_error:
             raise self.course_error
         return self.course_tree
+
+    def get_course_publication_structure(self, course_id):
+        self.publication_calls.append(course_id)
+        if self.publication_error:
+            raise self.publication_error
+        return self.publication_tree
 
     def _gallery_response(self, name, default):
         response = self.gallery_overrides.get(name, default)
@@ -116,11 +134,12 @@ class FakeHttpResponse:
 
 
 class FakeHttpSession:
-    def __init__(self, *, sessions, course_tree, auth_failures=None):
+    def __init__(self, *, sessions, course_tree, publication_tree=None, auth_failures=None):
         self.headers = {}
         self.cookies = FakeCookieJar()
         self.sessions = sessions
         self.course_tree = course_tree
+        self.publication_tree = publication_tree if publication_tree is not None else course_tree
         self.auth_failures = auth_failures if auth_failures is not None else [0]
         self.calls = []
         sessions.append(self)
@@ -152,7 +171,11 @@ class FakeHttpSession:
             parsed.path == f"/course/{COURSE_KEY}"
             and kwargs.get("headers", {}).get("Accept") == "application/json, text/plain, */*"
         ):
-            return FakeHttpResponse(self.course_tree)
+            if params == {"format": "concise"}:
+                return FakeHttpResponse(self.course_tree)
+            if params is None:
+                return FakeHttpResponse(self.publication_tree)
+            raise AssertionError(f"Unexpected course query parameters: {params}")
         self.cookies.set("csrftoken", "landing-csrf-secret", domain=parsed.hostname)
         return FakeHttpResponse({})
 
@@ -244,6 +267,7 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         ("get_play_config", GALLERY),
         ("get_audios", GALLERY),
     ]
+    assert reader.publication_calls == [COURSE_KEY]
     assert report["schema_version"] == "1.2.0"
     assert report["tenant"] == "uat"
     assert report["course_id"] == COURSE_KEY
@@ -325,7 +349,9 @@ def test_audit_reports_publication_state_for_all_sequential_sections(tmp_path):
         "child_info": {"children": []},
     }
     course_tree["child_info"]["children"][0]["child_info"]["children"].append(second_sequential)
-    reader = FakeStudioReader(course_tree=course_tree)
+    publication_tree = copy.deepcopy(course_tree)
+    publication_tree["child_info"]["children"][0]["child_info"]["children"].reverse()
+    reader = FakeStudioReader(course_tree=course_tree, publication_tree=publication_tree)
 
     report = audit_course(
         tenant="uat",
@@ -410,6 +436,37 @@ def test_missing_or_invalid_publication_state_is_unverified(tmp_path, field, val
     assert check["evidence"]["failure_category"] == "invalid_publication_state"
     assert report["status"] == "unverified"
     assert report["unverified_count"] == 1
+
+
+def test_publication_metadata_read_failure_does_not_discard_structure_audit(tmp_path):
+    reader = FakeStudioReader(
+        publication_error=StudioReadError(
+            "course_publication_structure",
+            "private response details",
+            503,
+        )
+    )
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+    )
+
+    publication_check = report["sequential_sections"][0]["checks"][0]
+    assert report["status"] == "unverified"
+    assert report["target_sections"]
+    assert all(check["status"] == "pass" for check in report["target_sections"][0]["checks"])
+    assert publication_check["status"] == "unverified"
+    assert publication_check["actual"] == {}
+    assert publication_check["evidence"] == {
+        "failure_stage": "course_publication_structure",
+        "failure_category": "read_failure",
+        "summary": "Studio course_publication_structure read failed with HTTP 503.",
+        "http_status": 503,
+    }
+    assert "private response details" not in json.dumps(report, ensure_ascii=False)
 
 
 def test_attention_visibility_is_an_unpublished_changes_issue_even_when_has_changes_is_false(tmp_path):
@@ -1146,6 +1203,7 @@ def test_course_with_no_target_verticals_is_a_course_level_issue(tmp_path):
         working_directory=tmp_path,
         audited_at="2026-10-28T01:02:03Z",
     )
+    assert reader.publication_calls == [COURSE_KEY]
 
     assert report["status"] == "issue"
     assert report["target_sections"] == []
@@ -1518,11 +1576,20 @@ def test_complete_authenticated_run_uses_configured_host_and_csrf_for_gallery_re
         },
     )
     sessions = []
+    concise_tree = course_tree_with_one_target()
+    publication_tree = copy.deepcopy(concise_tree)
+    default_sequential = publication_tree["child_info"]["children"][0]["child_info"]["children"][0]
+    default_vertical = default_sequential["child_info"]["children"][0]
+    default_vertical.pop("child_info")
 
     def reader_factory(**kwargs):
         return auditor.StudioApiReader(
             **kwargs,
-            session_factory=lambda: FakeHttpSession(sessions=sessions, course_tree=course_tree_with_one_target()),
+            session_factory=lambda: FakeHttpSession(
+                sessions=sessions,
+                course_tree=concise_tree,
+                publication_tree=publication_tree,
+            ),
         )
 
     if auth_mode == "account":
@@ -1553,10 +1620,12 @@ def test_complete_authenticated_run_uses_configured_host_and_csrf_for_gallery_re
             call[0] == "GET"
             and call[2] == f"/course/{COURSE_KEY}"
             and call[3].get("headers", {}).get("Accept") == "application/json, text/plain, */*"
-            and call[3].get("params") is None
         )
     ]
-    assert len(tree_reads) == 1
+    assert [call[3].get("params") for call in tree_reads] == [{"format": "concise"}, None]
+    output_dir = tmp_path / auth_mode / "auditor" / COURSE_KEY.replace(":", "_")
+    assert json.loads((output_dir / "course-structure.json").read_text(encoding="utf-8")) == concise_tree
+    assert report["sequential_sections"][0]["checks"][0]["status"] == "pass"
     gallery_reads = [call for call in calls if call[0] == "POST" and "/handler/" in call[2]]
     assert {call[2].rsplit("/", 1)[-1] for call in gallery_reads} == {"get_files", "get_play_config", "get_audios"}
     assert all(call[1] == "studio.example.test" for call in tree_reads + gallery_reads)
@@ -1636,10 +1705,9 @@ def test_login_session_refresh_reuses_the_same_course_snapshot_after_auth_handle
                 call[0] == "GET"
                 and call[2] == f"/course/{COURSE_KEY}"
                 and call[3].get("headers", {}).get("Accept") == "application/json, text/plain, */*"
-                and call[3].get("params") is None
             )
     ]
     assert report["status"] == "pass"
     assert len(sessions) == 2
     assert len(login_calls) == 2
-    assert len(tree_reads) == 1
+    assert [call[3].get("params") for call in tree_reads] == [{"format": "concise"}, None]

@@ -189,6 +189,7 @@ class StudioApiReader:
         try:
             response = self.session.get(
                 f"{self.studio_base}/course/{course_id}",
+                params={"format": "concise"},
                 headers={"Accept": "application/json, text/plain, */*"},
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
@@ -196,6 +197,23 @@ class StudioApiReader:
         except requests.RequestException as exc:
             raise StudioReadError("course_structure", "Studio course structure could not be read.") from exc
         return self._json_response(response, "course_structure")
+
+    def get_course_publication_structure(self, course_id: str) -> Any:
+        if course_id != self.course_id:
+            raise AuditError("The Studio reader course does not match the validated course key.")
+        try:
+            response = self.session.get(
+                f"{self.studio_base}/course/{course_id}",
+                headers={"Accept": "application/json, text/plain, */*"},
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise StudioReadError(
+                "course_publication_structure",
+                "Studio course publication state could not be read.",
+            ) from exc
+        return self._json_response(response, "course_publication_structure")
 
     def _post_gallery_read(self, gallery_locator: str, handler: str, body: dict[str, Any]) -> Any:
         if handler not in GALLERY_READ_HANDLERS:
