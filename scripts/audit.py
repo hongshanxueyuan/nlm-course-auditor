@@ -597,9 +597,6 @@ def unescaped_bold_candidate_count(markdown: str) -> int:
             run_length = run_end - index
             closing_index = run_end
             while closing_index < len(markdown):
-                if markdown[closing_index] == "\\":
-                    closing_index += 2
-                    continue
                 if markdown[closing_index] == "`":
                     closing_end = closing_index + 1
                     while closing_end < len(markdown) and markdown[closing_end] == "`":
