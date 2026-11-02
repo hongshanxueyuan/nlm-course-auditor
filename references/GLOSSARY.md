@@ -1,5 +1,7 @@
 # 领域词汇
 
+- **Sequential 小节（Sequential Section）**：课程结构中的 `sequential` 节点；整课正式发布状态检查以每个 sequential 小节为单位。
+- **小节正式发布状态（Subsection Publication State）**：Studio 是否已将小节当前保存的编辑同步到已发布版本。已有已发布版本不代表当前编辑也已发布；仍有未发布改动时，当前内容的发布尚未完成。
 - **审核目标（Audit Target）**：本次审核读取并检查的课程状态。V1 检查 Studio 中已保存的编辑版本，包括已保存但尚未发布的修改；不包括浏览器中尚未保存的编辑，也不等于 LMS 学员端的已发布版本。
 - **租户（Tenant）**：运营选择的 Studio 环境身份，用于确定允许访问的 Studio host；它与 course key 中的组织标识相互独立。URL 快捷输入必须映射到唯一已配置租户。
 - **课程定位符（Course Locator）**：用于标识审核目标课程的值。校验运营提供 tenant profile 与完整 `course-v1:...` course key，或使用能明确解析为这两项、且 host 匹配唯一配置 profile 的 Studio 课程/小节 URL；不接受短课程编号或无法明确解析的 URL。

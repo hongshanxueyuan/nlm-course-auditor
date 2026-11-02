@@ -13,7 +13,12 @@ from typing import Any, Protocol, TextIO
 from markdown_it import MarkdownIt
 
 from .errors import AuditError, GlobalAuthenticationError
-from .inputs import SAFE_BLOCK_LOCATOR_PATTERN, VERTICAL_LOCATOR_PATTERN, validate_course_key
+from .inputs import (
+    SAFE_BLOCK_LOCATOR_PATTERN,
+    SEQUENTIAL_LOCATOR_PATTERN,
+    VERTICAL_LOCATOR_PATTERN,
+    validate_course_key,
+)
 
 
 MAX_AUTH_REFRESHES = 4
@@ -29,6 +34,7 @@ BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
 SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
 SUBTITLE_HEADING_ORDER_CHECK_NAME = "Readable Gallery subtitles begin with a paragraph before any Markdown heading"
 SUBTITLE_BOLD_CHECK_NAME = "Saved Gallery subtitles use CommonMark-recognized bold delimiters"
+SEQUENTIAL_PUBLICATION_CHECK_NAME = "Sequential subsection has no unpublished edits"
 SUBTITLE_HEADING_ORDER_HINT = "大概率是 AI 段落划分不准确。"
 SUBTITLE_HEADING_ORDER_EXPECTED = {"first_content_block": "paragraph", "later_markdown_heading": True}
 SUBTITLE_MARKDOWN = MarkdownIt("commonmark").enable("table")
@@ -135,6 +141,110 @@ def find_target_verticals(course_tree: Any) -> list[dict[str, Any]]:
 
     visit(course_tree)
     return targets
+
+
+def find_sequential_sections(course_tree: Any) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+
+    def visit(node: dict[str, Any]) -> None:
+        if category_of(node) == "sequential":
+            sections.append(node)
+        for child in children_of(node):
+            visit(child)
+
+    visit(course_tree)
+    return sections
+
+
+def sequential_studio_url(studio_base: str, locator: str) -> str | None:
+    if not SEQUENTIAL_LOCATOR_PATTERN.fullmatch(locator):
+        return None
+    return f"{studio_base.rstrip('/')}/container/{locator}"
+
+
+def sequential_publication_check(section: dict[str, Any]) -> dict[str, Any]:
+    published = section.get("published")
+    has_changes = section.get("has_changes")
+    visibility_state = section.get("visibility_state")
+    invalid_fields: list[str] = []
+    actual: dict[str, Any] = {}
+
+    if isinstance(published, bool):
+        actual["published"] = published
+    else:
+        invalid_fields.append("published")
+    if isinstance(has_changes, bool):
+        actual["has_changes"] = has_changes
+    else:
+        invalid_fields.append("has_changes")
+    if "visibility_state" in section:
+        if isinstance(visibility_state, str) and visibility_state.strip():
+            actual["visibility_state"] = visibility_state
+        else:
+            invalid_fields.append("visibility_state")
+
+    failure_categories = []
+    if published is False:
+        failure_categories.append("not_published")
+    if has_changes is True or visibility_state == "needs_attention":
+        failure_categories.append("unpublished_changes")
+
+    evidence: dict[str, Any]
+    if failure_categories:
+        status = "issue"
+        if failure_categories == ["not_published"]:
+            summary = "The subsection has no published version."
+        elif failure_categories == ["unpublished_changes"]:
+            summary = "The current subsection has edits that are not published."
+        else:
+            summary = "The subsection has no published version and contains unpublished edits."
+        evidence = {
+            "failure_categories": failure_categories,
+            "summary": summary,
+        }
+        if invalid_fields:
+            evidence["invalid_fields"] = invalid_fields
+    elif invalid_fields:
+        status = "unverified"
+        evidence = {
+            "failure_category": "invalid_publication_state",
+            "invalid_fields": invalid_fields,
+            "summary": "The subsection publication state is missing or invalid.",
+        }
+    elif published is True and has_changes is False:
+        status = "pass"
+        evidence = {"summary": "The current subsection has no unpublished edits."}
+    else:
+        status = "unverified"
+        evidence = {
+            "failure_category": "incomplete_publication_state",
+            "summary": "The subsection publication state could not be confirmed.",
+        }
+
+    return {
+        "check_id": "NLMCA-013",
+        "category": "小节发布状态",
+        "name": SEQUENTIAL_PUBLICATION_CHECK_NAME,
+        "status": status,
+        "expected": {"published": True, "has_changes": False},
+        "actual": actual,
+        "evidence": evidence,
+    }
+
+
+def sequential_section_records(course_tree: Any, studio_base: str) -> list[dict[str, Any]]:
+    records = []
+    for section in find_sequential_sections(course_tree):
+        locator = locator_of(section)
+        if not SEQUENTIAL_LOCATOR_PATTERN.fullmatch(locator):
+            locator = ""
+        records.append({
+            "name": display_name_of(section),
+            "locator": locator,
+            "studio_url": sequential_studio_url(studio_base, locator) if locator else None,
+            "checks": [sequential_publication_check(section)],
+        })
+    return records
 
 
 def course_tree_is_complete(course_tree: Any) -> bool:
@@ -838,8 +948,17 @@ def section_checks(studio_reader: StudioReader, vertical: dict[str, Any]) -> lis
     return checks + gallery_data_checks + order_checks
 
 
-def aggregate_status(checks: list[dict[str, Any]], course_findings: list[dict[str, Any]]) -> tuple[str, int, int, int]:
+def aggregate_status(
+    checks: list[dict[str, Any]],
+    course_findings: list[dict[str, Any]],
+    sequential_sections: list[dict[str, Any]],
+) -> tuple[str, int, int, int]:
     statuses = [check["status"] for check in checks]
+    statuses.extend(
+        check["status"]
+        for section in sequential_sections
+        for check in section["checks"]
+    )
     statuses.extend(finding["status"] for finding in course_findings)
     issue_count = statuses.count("issue")
     unverified_count = statuses.count("unverified")
@@ -855,11 +974,17 @@ def make_report(
     audited_at: str | None,
     target_sections: list[dict[str, Any]],
     course_findings: list[dict[str, Any]],
+    sequential_sections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     checks = [check for section in target_sections for check in section["checks"]]
-    status, pass_count, issue_count, unverified_count = aggregate_status(checks, course_findings)
+    sequential_sections = sequential_sections or []
+    status, pass_count, issue_count, unverified_count = aggregate_status(
+        checks,
+        course_findings,
+        sequential_sections,
+    )
     return {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "tenant": tenant,
         "course_id": course_id,
         "audited_at": audited_at or utc_now(),
@@ -869,6 +994,7 @@ def make_report(
         "unverified_count": unverified_count,
         "course_findings": course_findings,
         "target_sections": target_sections,
+        "sequential_sections": sequential_sections,
     }
 
 
@@ -881,6 +1007,7 @@ def write_report(
     course_findings: list[dict[str, Any]],
     output_dir: Path,
     output: TextIO | None,
+    sequential_sections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     report = make_report(
         tenant=tenant,
@@ -888,6 +1015,7 @@ def write_report(
         audited_at=audited_at,
         target_sections=target_sections,
         course_findings=course_findings,
+        sequential_sections=sequential_sections,
     )
     atomic_write_json(output_dir / "report.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2), file=output or sys.stdout)
@@ -976,6 +1104,7 @@ def audit_course(
             output_dir=output_dir,
             output=output,
         )
+    sequential_sections = sequential_section_records(course_tree, studio_reader.studio_base)
     atomic_write_json(output_dir / "course-structure.json", course_tree)
 
     target_sections: list[dict[str, Any]] = []
@@ -999,6 +1128,7 @@ def audit_course(
                 audited_at=audited_at,
                 target_sections=target_sections,
                 course_findings=course_findings,
+                sequential_sections=sequential_sections,
                 output_dir=output_dir,
                 output=output,
             )
@@ -1032,6 +1162,7 @@ def audit_course(
         audited_at=audited_at,
         target_sections=target_sections,
         course_findings=course_findings,
+        sequential_sections=sequential_sections,
         output_dir=output_dir,
         output=output,
     )

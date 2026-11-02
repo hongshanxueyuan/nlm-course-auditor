@@ -148,7 +148,10 @@ class FakeHttpSession:
         parsed = urlparse(url)
         params = kwargs.get("params")
         self.calls.append(("GET", parsed.netloc, parsed.path, kwargs))
-        if params == {"format": "concise"}:
+        if (
+            parsed.path == f"/course/{COURSE_KEY}"
+            and kwargs.get("headers", {}).get("Accept") == "application/json, text/plain, */*"
+        ):
             return FakeHttpResponse(self.course_tree)
         self.cookies.set("csrftoken", "landing-csrf-secret", domain=parsed.hostname)
         return FakeHttpResponse({})
@@ -181,6 +184,10 @@ def course_tree_with_one_target():
                                 "id": "block-v1:FIRAx+1040663+20261018+type@sequential+block@section1",
                                 "category": "sequential",
                                 "display_name": "第一节",
+                                    "published": True,
+                                    "has_changes": False,
+                                    "visibility_state": "live",
+                                    "released_to_students": True,
                                 "child_info": {
                                     "children": [
                                         {
@@ -237,11 +244,11 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         ("get_play_config", GALLERY),
         ("get_audios", GALLERY),
     ]
-    assert report["schema_version"] == "1.1.0"
+    assert report["schema_version"] == "1.2.0"
     assert report["tenant"] == "uat"
     assert report["course_id"] == COURSE_KEY
     assert report["status"] == "pass"
-    assert report["pass_count"] == 10
+    assert report["pass_count"] == 11
     assert report["issue_count"] == 0
     assert report["unverified_count"] == 0
     assert report["course_findings"] == []
@@ -251,6 +258,8 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
     assert section["name"] == " 赋能内容 "
     assert section["locator"] == VERTICAL
     assert section["studio_url"] == f"{reader.studio_base}/container/{VERTICAL}"
+    assert report["sequential_sections"][0]["checks"][0]["status"] == "pass"
+    assert "released_to_students" not in report["sequential_sections"][0]["checks"][0]["actual"]
     assert [check["check_id"] for check in section["checks"]] == [
         "NLMCA-001",
         "NLMCA-002",
@@ -297,6 +306,129 @@ def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path
         assert private_value not in report_text
 
 
+def test_audit_reports_publication_state_for_all_sequential_sections(tmp_path):
+    course_tree = course_tree_with_one_target()
+    first_sequential = course_tree["child_info"]["children"][0]["child_info"]["children"][0]
+    first_sequential.update({
+        "published": True,
+        "has_changes": True,
+        "visibility_state": "needs_attention",
+        "released_to_students": False,
+    })
+    second_sequential = {
+        "id": "block-v1:FIRAx+1040663+20261018+type@sequential+block@section2",
+        "category": "sequential",
+        "display_name": "第二节",
+        "published": False,
+        "has_changes": False,
+        "released_to_students": True,
+        "child_info": {"children": []},
+    }
+    course_tree["child_info"]["children"][0]["child_info"]["children"].append(second_sequential)
+    reader = FakeStudioReader(course_tree=course_tree)
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=reader,
+        working_directory=tmp_path,
+    )
+
+    assert report["status"] == "issue"
+    assert report["sequential_sections"] == [
+        {
+            "name": "第一节",
+            "locator": "block-v1:FIRAx+1040663+20261018+type@sequential+block@section1",
+            "studio_url": f"{reader.studio_base}/container/block-v1:FIRAx+1040663+20261018+type@sequential+block@section1",
+            "checks": [
+                {
+                    "check_id": "NLMCA-013",
+                    "category": "小节发布状态",
+                    "name": "Sequential subsection has no unpublished edits",
+                    "status": "issue",
+                    "expected": {"published": True, "has_changes": False},
+                    "actual": {
+                        "published": True,
+                        "has_changes": True,
+                        "visibility_state": "needs_attention",
+                    },
+                    "evidence": {
+                        "failure_categories": ["unpublished_changes"],
+                        "summary": "The current subsection has edits that are not published.",
+                    },
+                }
+            ],
+        },
+        {
+            "name": "第二节",
+            "locator": "block-v1:FIRAx+1040663+20261018+type@sequential+block@section2",
+            "studio_url": f"{reader.studio_base}/container/block-v1:FIRAx+1040663+20261018+type@sequential+block@section2",
+            "checks": [
+                {
+                    "check_id": "NLMCA-013",
+                    "category": "小节发布状态",
+                    "name": "Sequential subsection has no unpublished edits",
+                    "status": "issue",
+                    "expected": {"published": True, "has_changes": False},
+                    "actual": {"published": False, "has_changes": False},
+                    "evidence": {
+                        "failure_categories": ["not_published"],
+                        "summary": "The subsection has no published version.",
+                    },
+                }
+            ],
+        },
+    ]
+    assert report["issue_count"] == 2
+    assert all("released_to_students" not in section["checks"][0]["actual"] for section in report["sequential_sections"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("published", None),
+        ("published", "true"),
+        ("has_changes", None),
+        ("has_changes", "false"),
+        ("visibility_state", 1),
+    ],
+)
+def test_missing_or_invalid_publication_state_is_unverified(tmp_path, field, value):
+    course_tree = course_tree_with_one_target()
+    sequential = course_tree["child_info"]["children"][0]["child_info"]["children"][0]
+    sequential[field] = value
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=FakeStudioReader(course_tree=course_tree),
+        working_directory=tmp_path,
+    )
+
+    check = report["sequential_sections"][0]["checks"][0]
+    assert check["status"] == "unverified"
+    assert check["evidence"]["failure_category"] == "invalid_publication_state"
+    assert report["status"] == "unverified"
+    assert report["unverified_count"] == 1
+
+
+def test_attention_visibility_is_an_unpublished_changes_issue_even_when_has_changes_is_false(tmp_path):
+    course_tree = course_tree_with_one_target()
+    sequential = course_tree["child_info"]["children"][0]["child_info"]["children"][0]
+    sequential.update({"published": True, "has_changes": False, "visibility_state": "needs_attention"})
+
+    report = audit_course(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        studio_reader=FakeStudioReader(course_tree=course_tree),
+        working_directory=tmp_path,
+    )
+
+    check = report["sequential_sections"][0]["checks"][0]
+    assert check["status"] == "issue"
+    assert check["evidence"]["failure_categories"] == ["unpublished_changes"]
+
+
 def test_time_config_exceeding_valid_files_reports_operator_hint_in_all_outputs(tmp_path, capsys):
     reader = FakeStudioReader(gallery_overrides={
         "play_config": {"play_config": {"time_config": [
@@ -315,7 +447,7 @@ def test_time_config_exceeding_valid_files_reports_operator_hint_in_all_outputs(
     )
 
     check = next(item for item in report["target_sections"][0]["checks"] if item["check_id"] == "NLMCA-004")
-    assert report["schema_version"] == "1.1.0"
+    assert report["schema_version"] == "1.2.0"
     assert check["status"] == "issue"
     assert check["actual"] == {"time_config_count": 3, "valid_file_count": 2}
     assert check["evidence"]["time_config_count"] == 3
@@ -1104,7 +1236,7 @@ def test_confirmed_issue_takes_priority_over_independent_unverified_check_counts
     assert report["status"] == "issue"
     assert report["issue_count"] == 2
     assert report["unverified_count"] == 2
-    assert report["pass_count"] == 6
+    assert report["pass_count"] == 7
 
 
 def test_malformed_gallery_handlers_are_unverified_without_exposing_payloads(tmp_path):
@@ -1415,7 +1547,15 @@ def test_complete_authenticated_run_uses_configured_host_and_csrf_for_gallery_re
 
     assert report["status"] == "pass"
     calls = [call for session in sessions for call in session.calls]
-    tree_reads = [call for call in calls if call[0] == "GET" and call[3].get("params") == {"format": "concise"}]
+    tree_reads = [
+        call for call in calls
+        if (
+            call[0] == "GET"
+            and call[2] == f"/course/{COURSE_KEY}"
+            and call[3].get("headers", {}).get("Accept") == "application/json, text/plain, */*"
+            and call[3].get("params") is None
+        )
+    ]
     assert len(tree_reads) == 1
     gallery_reads = [call for call in calls if call[0] == "POST" and "/handler/" in call[2]]
     assert {call[2].rsplit("/", 1)[-1] for call in gallery_reads} == {"get_files", "get_play_config", "get_audios"}
@@ -1490,7 +1630,15 @@ def test_login_session_refresh_reuses_the_same_course_snapshot_after_auth_handle
 
     calls = [call for session in sessions for call in session.calls]
     login_calls = [call for call in calls if call[0] == "POST" and call[2] == "/openapi/v1/auth/login/"]
-    tree_reads = [call for call in calls if call[0] == "GET" and call[3].get("params") == {"format": "concise"}]
+    tree_reads = [
+        call for call in calls
+            if (
+                call[0] == "GET"
+                and call[2] == f"/course/{COURSE_KEY}"
+                and call[3].get("headers", {}).get("Accept") == "application/json, text/plain, */*"
+                and call[3].get("params") is None
+            )
+    ]
     assert report["status"] == "pass"
     assert len(sessions) == 2
     assert len(login_calls) == 2

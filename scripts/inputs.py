@@ -18,6 +18,9 @@ SAFE_BLOCK_LOCATOR_PATTERN = re.compile(r"^block-v1:[A-Za-z0-9.+@_-]+$")
 VERTICAL_LOCATOR_PATTERN = re.compile(
     r"^block-v1:([^+/\s]+)\+([^+/\s]+)\+([^+/\s]+)\+type@vertical\+block@([^/\s?#]+)$"
 )
+SEQUENTIAL_LOCATOR_PATTERN = re.compile(
+    r"^block-v1:([^+/\s]+)\+([^+/\s]+)\+([^+/\s]+)\+type@sequential\+block@([^/\s?#]+)$"
+)
 
 
 DEFAULT_TENANTS: dict[str, dict[str, str]] = {

@@ -1,12 +1,12 @@
 ---
 name: nlm-course-auditor
-description: 审核 Studio 已保存课程中的“赋能内容”小节结构、ImageGallery 数据和字幕 Markdown 风险。
+description: 审核 Studio 课程中 sequential 小节的发布状态，以及“赋能内容”小节结构、ImageGallery 数据和字幕风险。
 disable-model-invocation: true
 ---
 
 # NLM 课程审核
 
-本 skill 对 Studio 中已保存的课程编辑状态执行只读筛查，检查课程结构、Gallery 数据、已保存字幕中开头为 `>` 的大于号、识别加粗失败的情况和正文段落与标题顺序。它不判断教学质量、事实正确性、措辞质量，也不验证已生成音频的实际读音或媒体播放情况。
+本 skill 对 Studio 已保存课程执行只读筛查，检查全课程 sequential 小节的正式发布状态，以及“赋能内容”vertical 的结构、Gallery 数据和已保存字幕风险。它不判断学员端可访问性、教学质量、事实正确性、措辞质量，也不验证已生成音频的实际读音或媒体播放情况。
 
 领域词汇和稳定术语见 [GLOSSARY.md](references/GLOSSARY.md)。
 
@@ -44,7 +44,9 @@ disable-model-invocation: true
 
 ## 只读边界和检查范围
 
-每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}?format=concise`，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程树。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
+整课课程树会单独扫描所有 `sequential` 小节的正式发布状态，不限于包含“赋能内容”的小节。只有 `published=true` 且 `has_changes=false` 才能确认当前编辑已发布；明确未发布或仍有未发布改动时记为问题，必要字段缺失或无效时无法确认。报告为每个 sequential 小节保留一条结果和 Studio 直达链接。
+
+每轮审核只调用一次 Studio 直连路由 `GET /course/{course_id}`，读取包含小节发布元数据的完整课程结构，保存这份新快照，并在同一轮中复用它发现目标。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程树。对每个 Gallery，程序只调用 `get_files`、`get_play_config` 和 `get_audios`，并在每个 POST 请求中带上 CSRF。这些 handler 读取 Studio 已保存的数据；请求客户端不提供课程内容修改操作。
 
 审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，且它是第一个直接子组件；也必须恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件，且它是最后一个直接子组件。中间的直接子组件不受顺序限制，更深层的后代组件不参与这些检查。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数、音频绑定数是否为 1，扫描保存字幕中开头为 `>` 的大于号；检查可读字幕中的加粗格式是否识别成功（由 CommonMark 解析器判定）；并检查正文段落是否先于 Markdown 标题。NLMCA-004 和 NLMCA-011 在命中时会附带运营排查提示；提示不改变检查结果或证据。稳定 ID 和通过标准见 [CHECKLIST.md](references/CHECKLIST.md)。
 
@@ -54,7 +56,7 @@ disable-model-invocation: true
 
 ## 产物与报告
 
-程序会在工作目录下创建或覆盖 `auditor/<course-key-with-colon-replaced>/course-structure.json` 和 `report.json`。报告包含租户和课程身份、`schema_version`、审核时间、总体状态与各状态数量、课程级 `course_findings`，以及每个目标 vertical 的 Studio 直达链接和逐项检查结果。适用时，检查结果可单独包含 `operator_hint`；它是供运营排查的经验提示，不属于审核证据，也不代表根因已确认。位置检查的证据只保留直接子组件总数、目标组件的位置，以及首末组件的类别和名称；不保存完整组件序列。其他证据只保留数量、页码、组件名称/类别、安全 locator 和经过脱敏的简短读取诊断，不包含 API payload、原始异常或服务端响应、凭据、Cookie、token、HTML 正文、字幕原文、媒体文件名或媒体 URL。字幕标记或加粗标记发现会链接到对应 Studio 小节；这些检查只报告已保存字幕的文本风险，不推断已有 MP3 的实际读音。
+程序会在工作目录下创建或覆盖 `auditor/<course-key-with-colon-replaced>/course-structure.json` 和 `report.json`。报告包含租户和课程身份、`schema_version`、审核时间、总体状态与各状态数量、课程级 `course_findings`、每个目标 vertical 的检查结果，以及 `sequential_sections` 中全课程每个 sequential 小节的发布检查和 Studio 直达链接。适用时，检查结果可单独包含 `operator_hint`；它是供运营排查的经验提示，不属于审核证据，也不代表根因已确认。位置检查的证据只保留直接子组件总数、目标组件的位置，以及首末组件的类别和名称；不保存完整组件序列。其他证据只保留数量、页码、组件名称/类别、安全 locator 和经过脱敏的简短读取诊断，不包含 API payload、原始异常或服务端响应、凭据、Cookie、token、HTML 正文、字幕原文、媒体文件名或媒体 URL。字幕标记或加粗标记发现会链接到对应 Studio 小节；这些检查只报告已保存字幕的文本风险，不推断已有 MP3 的实际读音。
 
 课程快照单独保存为 Studio 返回的课程结构，并与脱敏报告分开。每轮新审核都会重新读取并覆盖快照和报告。如果 Studio 无法返回有效的新结构，程序会移除旧快照，避免旧数据被误认为当前结果。中断后重新运行会从新一轮审核开始。
 
