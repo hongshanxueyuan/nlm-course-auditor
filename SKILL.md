@@ -1,12 +1,12 @@
 ---
 name: nlm-course-auditor
-description: 审核 Studio 课程中 sequential 小节的发布状态，以及“赋能内容”小节结构、ImageGallery 数据和字幕风险；默认单轮修复已确认的字幕行首 > 标记。
+description: 审核 Studio 课程中 sequential 小节的发布状态，以及“赋能内容”小节结构、ImageGallery 数据和字幕风险；默认单轮修复获准的行首 > 标记与可安全修复的加粗格式。
 disable-model-invocation: true
 ---
 
 # NLM 课程审核
 
-本 skill 检查 Studio 已保存课程中 sequential 小节的正式发布状态，以及“赋能内容”vertical 的结构、Gallery 数据和字幕风险。默认运行会先完整审核，再单轮修复获准的字幕行首 `>` 标记、发布实际修改的 vertical 并完整复审；使用 `--audit-only` 可只报告初审结果。修复条件与跳过规则见 [SUBTITLE-REPAIR.md](references/SUBTITLE-REPAIR.md)。本 skill 不判断学员端可访问性、教学质量、事实正确性、措辞质量，也不验证已生成音频的实际读音或媒体播放情况。
+本 skill 检查 Studio 已保存课程中 sequential 小节的正式发布状态，以及“赋能内容”vertical 的结构、Gallery 数据和字幕风险。默认运行会先完整审核，再单轮修复获准的字幕行首 `>` 标记和可安全规范化的 CommonMark 加粗标记，发布实际修改的 vertical 并完整复审；使用 `--audit-only` 可只报告初审结果。修复条件与跳过规则见 [SUBTITLE-REPAIR.md](references/SUBTITLE-REPAIR.md)。本 skill 不判断学员端可访问性、教学质量、事实正确性、措辞质量，也不验证已生成音频的实际读音或媒体播放情况。
 
 领域词汇和稳定术语见 [GLOSSARY.md](references/GLOSSARY.md)。
 
@@ -46,7 +46,7 @@ disable-model-invocation: true
 
 整课课程树会单独扫描所有 `sequential` 小节的正式发布状态，不限于包含“赋能内容”的小节。结构树和发布元数据从两次不同格式的 `GET /course/{course_id}` 分开读取：`format=concise` 响应用于完整结构树、目标发现和课程快照；默认格式响应只用于读取发布字段，并按 sequential locator 与结构树匹配。只有 `published=true` 且 `has_changes=false` 才能确认当前编辑已发布；明确未发布或仍有未发布改动时记为问题，必要字段缺失或无效时无法确认。报告为每个 sequential 小节保留一条结果和 Studio 直达链接。
 
-每轮完整审核读取一次 `GET /course/{course_id}?format=concise` 作为课程结构，并读取一次默认格式的 `GET /course/{course_id}` 作为发布元数据来源。默认格式响应不参与结构完整性校验；若该请求读取失败，发布状态检查记为无法确认，其他检查继续。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程数据。初审对每个 Gallery 调用 `get_files`、`get_play_config` 和 `get_audios`。默认运行若发现可确认的 NLMCA-010 问题，会再读取完整播放配置，通过 ImageGallery 更新 handler 保存字幕，并发布至少有一次成功更新的 vertical；只审核模式跳过这些写入。每次 Studio POST 写入都使用认证客户端及 CSRF。具体保护条件见 [SUBTITLE-REPAIR.md](references/SUBTITLE-REPAIR.md)。
+每轮完整审核读取一次 `GET /course/{course_id}?format=concise` 作为课程结构，并读取一次默认格式的 `GET /course/{course_id}` 作为发布元数据来源。默认格式响应不参与结构完整性校验；若该请求读取失败，发布状态检查记为无法确认，其他检查继续。账号密码登录时，程序可能向已配置的 Studio host 发起会话初始化请求以获取 CSRF cookie，再读取课程数据。初审对每个 Gallery 调用 `get_files`、`get_play_config` 和 `get_audios`。默认运行若发现可确认的 NLMCA-010 或 NLMCA-012 问题，会再读取完整播放配置，通过 ImageGallery 更新 handler 保存字幕，并发布至少有一次成功更新的 vertical；只审核模式跳过这些写入。每次 Studio POST 写入都使用认证客户端及 CSRF。具体保护条件见 [SUBTITLE-REPAIR.md](references/SUBTITLE-REPAIR.md)。
 
 审核会扫描所有 Studio 名称去掉首尾空格后等于“赋能内容”的 vertical。每个目标必须恰有一个 ImageGallery，且它是第一个直接子组件；也必须恰有一个名称去掉首尾空格后等于“本节要点”的 HTML 组件，且它是最后一个直接子组件。中间的直接子组件不受顺序限制，更深层的后代组件不参与这些检查。对每个发现的 Gallery，程序会核对有效文件记录数与 `total_count`、`play_config.time_config` 条目数与有效文件记录数、音频绑定数是否为 1，扫描保存字幕中开头为 `>` 的大于号；检查可读字幕中的加粗格式是否识别成功（由 CommonMark 解析器判定）；并检查正文段落是否先于 Markdown 标题。NLMCA-004 和 NLMCA-011 在命中时会附带运营排查提示；提示不改变检查结果或证据。稳定 ID 和通过标准见 [CHECKLIST.md](references/CHECKLIST.md)。
 
