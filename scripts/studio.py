@@ -8,7 +8,12 @@ from urllib.parse import urlparse
 import requests
 
 from .errors import AuditAuthenticationError, AuditError, StudioReadError
-from .inputs import SAFE_BLOCK_LOCATOR_PATTERN, VERTICAL_LOCATOR_PATTERN, derive_courses_base
+from .inputs import (
+    SAFE_BLOCK_LOCATOR_PATTERN,
+    SEQUENTIAL_LOCATOR_PATTERN,
+    VERTICAL_LOCATOR_PATTERN,
+    derive_courses_base,
+)
 
 
 REQUEST_TIMEOUT = 60
@@ -287,7 +292,15 @@ class StudioApiClient:
     def publish_vertical(self, vertical_locator: str) -> Any:
         if not VERTICAL_LOCATOR_PATTERN.fullmatch(vertical_locator):
             raise AuditError("The vertical locator is invalid.")
-        path = f"/xblock/{vertical_locator}"
+        return self._publish_xblock(vertical_locator, "publish_vertical")
+
+    def publish_sequential(self, sequential_locator: str) -> Any:
+        if not SEQUENTIAL_LOCATOR_PATTERN.fullmatch(sequential_locator):
+            raise AuditError("The sequential locator is invalid.")
+        return self._publish_xblock(sequential_locator, "publish_sequential")
+
+    def _publish_xblock(self, locator: str, handler: str) -> Any:
+        path = f"/xblock/{locator}"
         try:
             response = self.session.post(
                 f"{self.studio_base}{path}",
@@ -299,7 +312,7 @@ class StudioApiClient:
                     "X-Requested-With": "XMLHttpRequest",
                     "X-HTTP-Method-Override": "PATCH",
                     "Origin": self.studio_base,
-                    "Referer": f"{self.studio_base}/container/{vertical_locator}",
+                    "Referer": f"{self.studio_base}/container/{locator}",
                 },
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
@@ -307,5 +320,5 @@ class StudioApiClient:
         except StudioReadError:
             raise
         except requests.RequestException as exc:
-            raise StudioReadError("publish_vertical", "Studio vertical publish request failed.") from exc
-        return self._json_response(response, "publish_vertical")
+            raise StudioReadError(handler, f"Studio {handler} request failed.") from exc
+        return self._json_response(response, handler)

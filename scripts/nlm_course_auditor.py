@@ -24,7 +24,12 @@ from scripts.audit import (
     write_report,
 )
 from scripts.errors import AuditAuthenticationError, AuditError, StudioReadError
-from scripts.inputs import SAFE_BLOCK_LOCATOR_PATTERN, VERTICAL_LOCATOR_PATTERN, resolve_audit_input
+from scripts.inputs import (
+    SAFE_BLOCK_LOCATOR_PATTERN,
+    SEQUENTIAL_LOCATOR_PATTERN,
+    VERTICAL_LOCATOR_PATTERN,
+    resolve_audit_input,
+)
 from scripts.studio import StudioApiClient
 
 
@@ -78,14 +83,21 @@ def run_audit_request(
         output=io.StringIO(),
     )
     candidates = [] if audit_only else _subtitle_repair_candidates(initial_report)
+    publication_candidates = [] if audit_only else _sequential_publication_candidates(initial_report)
     repair_summary: dict[str, Any] = {
         "mode": "audit_only" if audit_only else "repair",
-        "repair_passes": 1 if candidates else 0,
+        "repair_passes": 1 if candidates or publication_candidates else 0,
         "targets": [],
     }
     final_report = initial_report
     if candidates:
         repair_summary["targets"] = _repair_subtitle_candidates(studio_client, candidates)
+    if publication_candidates:
+        repair_summary["sequential_publications"] = _publish_unpublished_sequential_sections(
+            studio_client,
+            publication_candidates,
+        )
+    if candidates or publication_candidates:
         final_report = audit_course(
             tenant=resolved_tenant,
             course_id=resolved_course_id,
@@ -98,6 +110,50 @@ def run_audit_request(
     atomic_write_json(output_dir / "report.json", final_report)
     print(json.dumps(final_report, ensure_ascii=False, indent=2), file=output or sys.stdout)
     return final_report
+
+
+def _sequential_publication_candidates(report: dict[str, Any]) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_locators: set[str] = set()
+    for section in report.get("sequential_sections", []):
+        locator = section.get("locator") if isinstance(section, dict) else None
+        if not isinstance(locator, str) or not SEQUENTIAL_LOCATOR_PATTERN.fullmatch(locator):
+            continue
+        has_publication_issue = any(
+            check.get("check_id") == "NLMCA-013" and check.get("status") == "issue"
+            for check in section.get("checks", [])
+            if isinstance(check, dict)
+        )
+        if has_publication_issue and locator not in seen_locators:
+            candidates.append({"sequential_locator": locator})
+            seen_locators.add(locator)
+    return candidates
+
+
+def _publish_unpublished_sequential_sections(
+    studio_client: StudioRepairClient,
+    candidates: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    publications: list[dict[str, Any]] = []
+    for candidate in candidates:
+        sequential_locator = candidate["sequential_locator"]
+        publication: dict[str, Any] = {
+            "sequential_locator": sequential_locator,
+            "publish_status": "failed",
+        }
+        try:
+            response = authenticated_studio_call(
+                studio_client,
+                "publish_sequential",
+                lambda: studio_client.publish_sequential(sequential_locator),
+            )
+        except Exception as exc:
+            if http_status_of(exc) is not None:
+                publication["publish_http_status"] = http_status_of(exc)
+        else:
+            publication["publish_status"] = "completed" if _write_response_is_valid(response) else "failed"
+        publications.append(publication)
+    return publications
 
 
 def _subtitle_repair_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -346,7 +402,9 @@ def _repair_subtitle_candidates(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Audit a saved Studio course and repair approved subtitle issues")
+    parser = argparse.ArgumentParser(
+        description="Audit a saved Studio course, repair approved subtitle issues, and publish confirmed unpublished subsections"
+    )
     parser.add_argument("--tenant", help="configured tenant profile key")
     parser.add_argument("--course-id", help="complete course-v1:ORG+COURSE+RUN key")
     parser.add_argument("--studio-url", help="Studio course URL or vertical container URL")
