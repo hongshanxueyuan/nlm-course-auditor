@@ -31,6 +31,7 @@ SUMMARY_COMPONENT_NAME = "本节要点"
 TIME_CONFIG_EXCEEDS_FILES_HINT = "大概率是 imagegallery 有几页图片未成功上传。"
 INVALID_TIME_CONFIG_HINT = "大概率是 imagegallery 的音频字幕未成功上传。"
 BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
+RAW_BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:(?:>|&gt;?)+ *)+")
 SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
 SUBTITLE_HEADING_ORDER_CHECK_NAME = "Readable Gallery subtitles begin with a paragraph before any Markdown heading"
 SUBTITLE_BOLD_CHECK_NAME = "Saved Gallery subtitles use CommonMark-recognized bold delimiters"
@@ -52,6 +53,10 @@ class StudioReader(Protocol):
     def get_play_config(self, gallery_locator: str) -> Any: ...
 
     def get_audios(self, gallery_locator: str) -> Any: ...
+
+    def update_play_config(self, gallery_locator: str, play_config: dict[str, Any]) -> Any: ...
+
+    def publish_vertical(self, vertical_locator: str) -> Any: ...
 
 
 def utc_now() -> str:
@@ -666,6 +671,27 @@ def saved_subtitle_check(
         {"all_subtitles_readable_without_blockquote_prefixes": True},
         {"affected_page_count": 0, "marker_count": 0}, evidence,
     )
+
+
+def remove_supported_blockquote_prefixes(subtitle: str) -> tuple[str, int]:
+    """Remove only the raw and &gt; spellings already recognized by NLMCA-010."""
+    updated_lines: list[str] = []
+    marker_count_total = 0
+    lines = subtitle.split("\n")
+    for line in lines:
+        decoded_match = BLOCKQUOTE_PREFIX_RE.match(html.unescape(line))
+        raw_match = RAW_BLOCKQUOTE_PREFIX_RE.match(line)
+        if (
+            decoded_match is None
+            or raw_match is None
+            or html.unescape(raw_match.group(0)) != decoded_match.group(0)
+        ):
+            updated_lines.append(line)
+            continue
+        marker_count = decoded_match.group(0).count(">")
+        updated_lines.append(line[raw_match.end():])
+        marker_count_total += marker_count
+    return "\n".join(updated_lines), marker_count_total
 
 
 def subtitle_page_number(item: dict[str, Any], index: int) -> int:
