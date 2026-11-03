@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 import pytest
 
@@ -2334,3 +2335,50 @@ def test_login_session_refresh_reuses_the_same_course_snapshot_after_auth_handle
     assert len(sessions) == 2
     assert len(login_calls) == 2
     assert [call[3].get("params") for call in tree_reads] == [{"format": "concise"}, None]
+
+
+def test_uat_shaped_play_config_repairs_and_preserves_timing_contract(tmp_path):
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "studio_play_config_uat_shape_redacted.json"
+    )
+    response = json.loads(fixture_path.read_text(encoding="utf-8"))
+    original_play_config = response["play_config"]
+    client = MutableFakeStudioClient(response)
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=tenant_config(tmp_path),
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "uat-config-shape",
+        output=io.StringIO(),
+    )
+
+    expected_play_config = copy.deepcopy(original_play_config)
+    expected_play_config["time_config"][0]["subtitle"] = "[REDACTED page 1 subtitle]"
+    assert client.updated_configs == [expected_play_config]
+    updated_play_config = client.updated_configs[0]
+    assert updated_play_config["show_subtitles"] == original_play_config["show_subtitles"]
+    for original_page, updated_page in zip(
+        original_play_config["time_config"], expected_play_config["time_config"]
+    ):
+        assert (updated_page["page"], updated_page["start"], updated_page["end"]) == (
+            original_page["page"], original_page["start"], original_page["end"]
+        )
+
+    update_index = client.calls.index(("update_play_config", GALLERY))
+    publish_index = client.calls.index(("publish_vertical", VERTICAL))
+    audit_indices = [
+        i for i, call in enumerate(client.calls) if call[0] == "get_course_structure"
+    ]
+    assert len(audit_indices) == 2
+    assert update_index < publish_index < audit_indices[-1]
+    marker_check = next(
+        item
+        for item in report["target_sections"][0]["checks"]
+        if item["check_id"] == "NLMCA-010"
+    )
+    assert marker_check["status"] == "pass"
+    assert "[REDACTED page 1 subtitle]" not in json.dumps(report, ensure_ascii=False)

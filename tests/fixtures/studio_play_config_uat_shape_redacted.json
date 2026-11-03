@@ -1,0 +1,19 @@
+{
+  "play_config": {
+    "show_subtitles": true,
+    "time_config": [
+      {
+        "page": 1,
+        "start": 0,
+        "end": 5,
+        "subtitle": "> [REDACTED page 1 subtitle]"
+      },
+      {
+        "page": 2,
+        "start": 5,
+        "end": 12,
+        "subtitle": "[REDACTED page 2 subtitle]"
+      }
+    ]
+  }
+}
