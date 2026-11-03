@@ -1692,14 +1692,16 @@ def test_default_run_repairs_saved_leading_markers_then_publishes_and_reaudits(t
         "time_config": [
             {
                 "page": 4,
-                "time": 12.5,
+                "start": 120,
+                "end": 135,
                 "subtitle": "  > raw marker text",
                 "audio_id": "audio-page-four",
                 "custom": {"keep": "page-four"},
             },
             {
                 "page": 9,
-                "time": 18,
+                "start": 180,
+                "end": 198,
                 "subtitle": "&gt; entity marker\n&gt semicolonless marker",
                 "audio_id": "audio-page-nine",
             },
@@ -1737,14 +1739,16 @@ def test_default_run_repairs_saved_leading_markers_then_publishes_and_reaudits(t
         "time_config": [
             {
                 "page": 4,
-                "time": 12.5,
+                "start": 120,
+                "end": 135,
                 "subtitle": "raw marker text",
                 "audio_id": "audio-page-four",
                 "custom": {"keep": "page-four"},
             },
             {
                 "page": 9,
-                "time": 18,
+                "start": 180,
+                "end": 198,
                 "subtitle": "entity marker\nsemicolonless marker",
                 "audio_id": "audio-page-nine",
             },
@@ -1812,8 +1816,8 @@ def test_repair_skips_incomplete_target_groups_gallery_updates_by_vertical_and_c
     config_path = tenant_config(tmp_path)
     tree, second_vertical, second_gallery = course_tree_with_multiple_repair_targets()
     shared_config = {"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 1, "time": 5, "subtitle": "> repair this page"},
-        {"page": 2, "time": 9, "subtitle": "leave this page"},
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> repair this page"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "leave this page"},
     ]}}
     client = MutableFakeStudioClient(
         shared_config,
@@ -1859,8 +1863,8 @@ def test_repair_skips_incomplete_target_groups_gallery_updates_by_vertical_and_c
 def test_failed_write_still_finishes_one_final_course_audit(tmp_path, failed_stage):
     config_path = tenant_config(tmp_path)
     client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 1, "time": 5, "subtitle": "> approved repair"},
-        {"page": 2, "time": 9, "subtitle": "unchanged"},
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> approved repair"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "unchanged"},
     ]}})
     if failed_stage == "update":
         client.update_response = None
@@ -1969,8 +1973,8 @@ def test_authenticated_repair_uses_full_play_config_and_csrf_on_update_and_verti
         "show_subtitles": False,
         "voice_mode": "keep-me",
         "time_config": [
-            {"page": 1, "time": 5, "subtitle": "> repair this", "audio_id": "audio-1"},
-            {"page": 2, "time": 7, "subtitle": "keep this", "audio_id": "audio-2"},
+            {"page": 1, "start": 0, "end": 5, "subtitle": "> repair this", "audio_id": "audio-1"},
+            {"page": 2, "start": 5, "end": 12, "subtitle": "keep this", "audio_id": "audio-2"},
         ],
     }}
 
@@ -2012,8 +2016,8 @@ def test_authenticated_repair_uses_full_play_config_and_csrf_on_update_and_verti
         "show_subtitles": False,
         "voice_mode": "keep-me",
         "time_config": [
-            {"page": 1, "time": 5, "subtitle": "repair this", "audio_id": "audio-1"},
-            {"page": 2, "time": 7, "subtitle": "keep this", "audio_id": "audio-2"},
+            {"page": 1, "start": 0, "end": 5, "subtitle": "repair this", "audio_id": "audio-1"},
+            {"page": 2, "start": 5, "end": 12, "subtitle": "keep this", "audio_id": "audio-2"},
         ],
     }}
     assert publish_request[3]["json"] == {"publish": "make_public"}
@@ -2027,8 +2031,8 @@ def test_authenticated_repair_uses_full_play_config_and_csrf_on_update_and_verti
 def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_result(tmp_path):
     config_path = tenant_config(tmp_path)
     original = {"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 3, "time": 12, "subtitle": "** private bold wording **"},
-        {"page": 4, "time": 18, "subtitle": "Already **valid bold** wording"},
+        {"page": 3, "start": 0, "end": 12, "subtitle": "** private bold wording **"},
+        {"page": 4, "start": 12, "end": 30, "subtitle": "Already **valid bold** wording"},
     ]}}
     client = MutableFakeStudioClient(original)
 
@@ -2045,8 +2049,8 @@ def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_resu
     assert client.updated_configs == [{
         "show_subtitles": True,
         "time_config": [
-            {"page": 3, "time": 12, "subtitle": "**private bold wording**"},
-            {"page": 4, "time": 18, "subtitle": "Already **valid bold** wording"},
+            {"page": 3, "start": 0, "end": 12, "subtitle": "**private bold wording**"},
+            {"page": 4, "start": 12, "end": 30, "subtitle": "Already **valid bold** wording"},
         ],
     }]
     assert [call[0] for call in client.calls].count("get_course_structure") == 2
@@ -2072,8 +2076,8 @@ def test_unpaired_ambiguous_and_still_invalid_bold_syntax_is_not_written(
 ):
     config_path = tenant_config(tmp_path)
     client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 6, "time": 5, "subtitle": subtitle},
-        {"page": 7, "time": 9, "subtitle": "clean subtitle"},
+        {"page": 6, "start": 0, "end": 5, "subtitle": subtitle},
+        {"page": 7, "start": 5, "end": 14, "subtitle": "clean subtitle"},
     ]}})
 
     report = auditor.run_audit_request(
@@ -2112,8 +2116,8 @@ def test_unpaired_ambiguous_and_still_invalid_bold_syntax_is_not_written(
 def test_leading_marker_and_bold_spacing_repairs_share_one_gallery_update(tmp_path):
     config_path = tenant_config(tmp_path)
     client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 8, "time": 5, "subtitle": "> ** confidential shared repair **"},
-        {"page": 9, "time": 9, "subtitle": "unchanged wording"},
+        {"page": 8, "start": 0, "end": 5, "subtitle": "> ** confidential shared repair **"},
+        {"page": 9, "start": 5, "end": 14, "subtitle": "unchanged wording"},
     ]}})
 
     report = auditor.run_audit_request(
@@ -2127,8 +2131,8 @@ def test_leading_marker_and_bold_spacing_repairs_share_one_gallery_update(tmp_pa
 
     assert len(client.updated_configs) == 1
     assert client.updated_configs[0]["time_config"] == [
-        {"page": 8, "time": 5, "subtitle": "**confidential shared repair**"},
-        {"page": 9, "time": 9, "subtitle": "unchanged wording"},
+        {"page": 8, "start": 0, "end": 5, "subtitle": "**confidential shared repair**"},
+        {"page": 9, "start": 5, "end": 14, "subtitle": "unchanged wording"},
     ]
     assert [call for call in client.calls if call[0] == "publish_vertical"] == [
         ("publish_vertical", VERTICAL),
@@ -2144,8 +2148,8 @@ def test_leading_marker_and_bold_spacing_repairs_share_one_gallery_update(tmp_pa
 def test_safe_leading_marker_repair_is_not_blocked_by_unpaired_bold_delimiter(tmp_path):
     config_path = tenant_config(tmp_path)
     original = {"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 1, "time": 5, "subtitle": "> ** confidential unpaired wording"},
-        {"page": 2, "time": 9, "subtitle": "keep this page"},
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> ** confidential unpaired wording"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "keep this page"},
     ]}}
     client = MutableFakeStudioClient(original)
 
@@ -2159,8 +2163,8 @@ def test_safe_leading_marker_repair_is_not_blocked_by_unpaired_bold_delimiter(tm
     )
 
     assert client.updated_configs == [{"show_subtitles": True, "time_config": [
-        {"page": 1, "time": 5, "subtitle": "** confidential unpaired wording"},
-        {"page": 2, "time": 9, "subtitle": "keep this page"},
+        {"page": 1, "start": 0, "end": 5, "subtitle": "** confidential unpaired wording"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "keep this page"},
     ]}]
     assert [call for call in client.calls if call[0] == "publish_vertical"] == [
         ("publish_vertical", VERTICAL),
@@ -2174,12 +2178,12 @@ def test_safe_leading_marker_repair_is_not_blocked_by_unpaired_bold_delimiter(tm
     assert repair["bold_affected_pages"][0]["reason"] == "unpaired_delimiter"
 
 
-@pytest.mark.parametrize("missing_field", ["show_subtitles", "page", "time"])
+@pytest.mark.parametrize("missing_field", ["show_subtitles", "page", "start", "end"])
 def test_incomplete_play_config_is_skipped_before_any_write_and_reaudited(tmp_path, missing_field):
     config_path = tenant_config(tmp_path)
     complete_config = {"play_config": {"show_subtitles": True, "time_config": [
-        {"page": 1, "time": 5, "subtitle": "> repair candidate"},
-        {"page": 2, "time": 9, "subtitle": "untouched page"},
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> repair candidate"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "untouched page"},
     ]}}
     incomplete_config = copy.deepcopy(complete_config)
     play_config = incomplete_config["play_config"]
@@ -2210,6 +2214,49 @@ def test_incomplete_play_config_is_skipped_before_any_write_and_reaudited(tmp_pa
     assert next(
         item for item in report["target_sections"][0]["checks"] if item["check_id"] == "NLMCA-010"
     )["status"] == "issue"
+
+
+@pytest.mark.parametrize(("invalid_field", "invalid_value"), [
+    ("start", "0"),
+    ("start", True),
+    ("start", -1),
+    ("end", "5"),
+    ("end", False),
+    ("end", -1),
+    ("range", None),
+])
+def test_invalid_play_config_timing_values_are_skipped_before_any_write(tmp_path, invalid_field, invalid_value):
+    config_path = tenant_config(tmp_path)
+    complete_config = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> repair candidate"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "untouched page"},
+    ]}}
+    invalid_config = copy.deepcopy(complete_config)
+    first_page = invalid_config["play_config"]["time_config"][0]
+    if invalid_field == "range":
+        first_page.update({"start": 10, "end": 5})
+    else:
+        first_page[invalid_field] = invalid_value
+    client = MutableFakeStudioClient(
+        complete_config,
+        repair_config_overrides={GALLERY: invalid_config},
+    )
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / f"invalid-{invalid_field}-{str(invalid_value).lower()}",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == []
+    assert not any(call[0] == "publish_vertical" for call in client.calls)
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "skipped"
+    assert gallery_result["reason"] == "play_config_unverified"
 
 
 def test_missing_authentication_writes_global_unverified_report_without_studio_reads(tmp_path):
