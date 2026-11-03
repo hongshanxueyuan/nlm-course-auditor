@@ -1,6 +1,6 @@
 ---
 name: nlm-course-auditor
-description: 审核 Studio 课程中 sequential 小节的发布状态，以及“赋能内容”小节结构、ImageGallery 数据和字幕风险；默认单轮修复获准的行首 > 标记与可安全修复的加粗格式。
+description: 审核 Studio 课程中 sequential 小节的发布状态，以及“赋能内容”小节结构、ImageGallery 数据和字幕风险；默认单轮修复获准的行首 > 标记与加粗格式，范围含糊或空白规范无效时移除 ** 分隔符。
 disable-model-invocation: true
 ---
 

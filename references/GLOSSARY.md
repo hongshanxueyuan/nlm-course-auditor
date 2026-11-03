@@ -27,5 +27,6 @@
 - **校验运营（Audit Operator）**：运行本 skill 的人，可能与做课运营不同。
 - **首轮筛查（First-pass Screening）**：用明确检查项暴露课程问题，交由校验运营人工复核；它不替代后续人工审核。
 - **语音文本风险（Speech-Text Risk）**：imagegallery 已保存的页文中存在可能进入语音合成的格式残留；该检查判断文本状态，不判定已经生成的 MP3 实际读音。
+- **字幕内容检查（Subtitle Content Check）**：对已保存字幕中的格式与结构特征进行筛查，例如行首 `>`、加粗标记和正文段落与标题的顺序；结果作为运营待复核项呈现。
 - **标题块（Heading Block）**：在 imagegallery 单页 `subtitle` 中，使用 Markdown 标题语法表达的内容块。
 - **正文段落（Body Paragraph）**：在 imagegallery 单页 `subtitle` 中，按 Markdown 语法解析出的普通段落块，不包括标题、列表或引用等其他块类型。
