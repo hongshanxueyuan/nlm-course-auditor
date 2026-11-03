@@ -772,8 +772,8 @@ def subtitle_heading_order_check(
     )
 
 
-def unescaped_bold_candidate_count(markdown: str) -> int:
-    candidate_count = 0
+def unescaped_bold_runs(markdown: str) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
     index = 0
     while index < len(markdown):
         if markdown[index] == "\\":
@@ -803,11 +803,15 @@ def unescaped_bold_candidate_count(markdown: str) -> int:
             run_end = index + 2
             while run_end < len(markdown) and markdown[run_end] == "*":
                 run_end += 1
-            candidate_count += (run_end - index) // 2
+            runs.append((index, run_end))
             index = run_end
             continue
         index += 1
-    return candidate_count
+    return runs
+
+
+def unescaped_bold_candidate_count(markdown: str) -> int:
+    return sum((end - start) // 2 for start, end in unescaped_bold_runs(markdown))
 
 
 def markdown_bold_delimiter_counts(markdown: str) -> tuple[int, int]:
@@ -822,6 +826,47 @@ def markdown_bold_delimiter_counts(markdown: str) -> tuple[int, int]:
             for child in token.children or []
         )
     return candidate_count, recognized_count
+
+
+def normalize_unrecognized_bold_spacing(markdown: str) -> tuple[str | None, str]:
+    candidate_count, recognized_count = markdown_bold_delimiter_counts(markdown)
+    if candidate_count == recognized_count:
+        return markdown, "already_recognized"
+
+    runs = unescaped_bold_runs(markdown)
+    if (
+        sum((end - start) // 2 for start, end in runs) != candidate_count
+        or any(end - start != 2 for start, end in runs)
+    ):
+        return None, "ambiguous_bold_span"
+    if len(runs) == 1:
+        return None, "unpaired_delimiter"
+    if len(runs) != 2 or candidate_count != 2:
+        return None, "ambiguous_bold_span"
+
+    updated = markdown
+    edits: list[tuple[int, int, str]] = []
+    for opening, closing in zip(runs[::2], runs[1::2]):
+        open_end = opening[1]
+        close_start = closing[0]
+        if "\n" in markdown[open_end:close_start]:
+            return None, "ambiguous_bold_span"
+        contents = markdown[open_end:close_start]
+        normalized_contents = contents.lstrip(" \t").rstrip(" \t")
+        if not normalized_contents:
+            return None, "ambiguous_bold_span"
+        if normalized_contents != contents:
+            edits.append((open_end, close_start, normalized_contents))
+
+    if not edits:
+        return None, "spacing_not_repairable"
+    for start, end, replacement in reversed(edits):
+        updated = updated[:start] + replacement + updated[end:]
+
+    repaired_candidates, repaired_delimiters = markdown_bold_delimiter_counts(updated)
+    if repaired_candidates != repaired_delimiters:
+        return None, "normalization_unverified"
+    return updated, "repaired"
 
 
 def subtitle_bold_check(

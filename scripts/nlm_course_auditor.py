@@ -17,6 +17,7 @@ from scripts.audit import (
     authenticated_read,
     audit_course,
     http_status_of,
+    normalize_unrecognized_bold_spacing,
     remove_supported_blockquote_prefixes,
     stopped_finding,
     subtitle_page_number,
@@ -100,41 +101,58 @@ def run_audit_request(
 
 
 def _subtitle_repair_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
     for section in report.get("target_sections", []):
         vertical_locator = section.get("locator")
         if not isinstance(vertical_locator, str) or not VERTICAL_LOCATOR_PATTERN.fullmatch(vertical_locator):
             continue
         for check in section.get("checks", []):
-            if check.get("check_id") != "NLMCA-010" or check.get("status") != "issue":
+            check_id = check.get("check_id")
+            if check_id not in {"NLMCA-010", "NLMCA-012"} or check.get("status") != "issue":
                 continue
             evidence = check.get("evidence")
             gallery_locator = evidence.get("gallery_locator") if isinstance(evidence, dict) else None
             if not isinstance(gallery_locator, str) or not SAFE_BLOCK_LOCATOR_PATTERN.fullmatch(gallery_locator):
                 continue
             identity = (vertical_locator, gallery_locator)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            pages = evidence.get("affected_pages", [])
-            safe_pages = [
-                {"page": item["page"], "marker_count": item["marker_count"]}
-                for item in pages
-                if isinstance(item, dict)
-                and isinstance(item.get("page"), int)
-                and not isinstance(item.get("page"), bool)
-                and isinstance(item.get("marker_count"), int)
-                and not isinstance(item.get("marker_count"), bool)
-            ] if isinstance(pages, list) else []
-            marker_count = evidence.get("total_marker_count")
-            candidates.append({
+            candidate = candidates.setdefault(identity, {
                 "vertical_locator": vertical_locator,
                 "gallery_locator": gallery_locator,
-                "affected_pages": safe_pages,
-                "marker_count": marker_count if isinstance(marker_count, int) and not isinstance(marker_count, bool) else 0,
+                "repair_types": [],
+                "affected_pages": [],
+                "marker_count": 0,
+                "bold_affected_pages": [],
+                "unrecognized_bold_count": 0,
             })
-    return candidates
+            if check_id == "NLMCA-010":
+                pages = evidence.get("affected_pages", [])
+                candidate["affected_pages"] = [
+                    {"page": item["page"], "marker_count": item["marker_count"]}
+                    for item in pages
+                    if isinstance(item, dict)
+                    and isinstance(item.get("page"), int)
+                    and not isinstance(item.get("page"), bool)
+                    and isinstance(item.get("marker_count"), int)
+                    and not isinstance(item.get("marker_count"), bool)
+                ] if isinstance(pages, list) else []
+                marker_count = evidence.get("total_marker_count")
+                candidate["marker_count"] = marker_count if isinstance(marker_count, int) and not isinstance(marker_count, bool) else 0
+                candidate["repair_types"].append("blockquote")
+            else:
+                pages = evidence.get("affected_pages", [])
+                candidate["bold_affected_pages"] = [
+                    {"page": item["page"], "unrecognized_bold_count": item["unrecognized_bold_count"]}
+                    for item in pages
+                    if isinstance(item, dict)
+                    and isinstance(item.get("page"), int)
+                    and not isinstance(item.get("page"), bool)
+                    and isinstance(item.get("unrecognized_bold_count"), int)
+                    and not isinstance(item.get("unrecognized_bold_count"), bool)
+                ] if isinstance(pages, list) else []
+                bold_count = evidence.get("unrecognized_bold_count")
+                candidate["unrecognized_bold_count"] = bold_count if isinstance(bold_count, int) and not isinstance(bold_count, bool) else 0
+                candidate["repair_types"].append("bold")
+    return list(candidates.values())
 
 
 def _complete_play_config(payload: Any) -> dict[str, Any] | None:
@@ -161,12 +179,19 @@ def _write_response_is_valid(payload: Any) -> bool:
 
 
 def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict[str, Any]:
+    bold_attempted = "bold" in candidate["repair_types"]
     result = {
         "gallery_locator": candidate["gallery_locator"],
         "repair_status": "skipped",
         "reason": "play_config_unverified",
         "affected_pages": candidate["affected_pages"],
         "marker_count": candidate["marker_count"],
+        "bold_repair_status": "skipped" if bold_attempted else "not_required",
+        "bold_affected_pages": [
+            {**item, "status": "skipped", "reason": "play_config_unverified"}
+            for item in candidate["bold_affected_pages"]
+        ],
+        "unrecognized_bold_count": candidate["unrecognized_bold_count"],
     }
     try:
         payload = authenticated_read(
@@ -183,16 +208,57 @@ def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict
         return result
 
     page_counts: dict[int, int] = {}
+    bold_page_counts = {
+        item["page"]: item["unrecognized_bold_count"]
+        for item in candidate["bold_affected_pages"]
+    }
+    bold_outcomes: list[dict[str, Any]] = []
     changed = False
     for index, item in enumerate(play_config["time_config"], start=1):
-        updated_subtitle, marker_count = remove_supported_blockquote_prefixes(item["subtitle"])
-        if marker_count:
+        subtitle = item["subtitle"]
+        page_number = subtitle_page_number(item, index)
+        updated_subtitle = subtitle
+        marker_count = 0
+        if "blockquote" in candidate["repair_types"]:
+            updated_subtitle, marker_count = remove_supported_blockquote_prefixes(updated_subtitle)
+        if page_number in bold_page_counts:
+            bold_subtitle, reason = normalize_unrecognized_bold_spacing(updated_subtitle)
+            if bold_subtitle is None:
+                bold_status = "skipped"
+            elif reason == "already_recognized" and updated_subtitle == subtitle:
+                bold_status = "skipped"
+                reason = "no_longer_present"
+            else:
+                bold_status = "repaired"
+                if reason == "already_recognized":
+                    reason = "resolved_by_other_approved_repair"
+            bold_outcomes.append({
+                "page": page_number,
+                "unrecognized_bold_count": bold_page_counts[page_number],
+                "status": bold_status,
+                "reason": reason,
+            })
+            if bold_subtitle is None:
+                continue
+            updated_subtitle = bold_subtitle
+        if updated_subtitle != subtitle:
             item["subtitle"] = updated_subtitle
-            page_number = subtitle_page_number(item, index)
-            page_counts[page_number] = page_counts.get(page_number, 0) + marker_count
+            if marker_count:
+                page_counts[page_number] = page_counts.get(page_number, 0) + marker_count
             changed = True
+
+    if bold_attempted:
+        result["bold_affected_pages"] = bold_outcomes
+        repaired_bold_pages = sum(item["status"] == "repaired" for item in bold_outcomes)
+        skipped_bold_pages = sum(item["status"] == "skipped" for item in bold_outcomes)
+        if repaired_bold_pages and skipped_bold_pages:
+            result["bold_repair_status"] = "partial"
+        elif repaired_bold_pages:
+            result["bold_repair_status"] = "repaired"
+        else:
+            result["bold_repair_status"] = "skipped"
     if not changed:
-        result["reason"] = "no_supported_prefix_remained"
+        result["reason"] = "no_safe_subtitle_change" if bold_attempted else "no_supported_prefix_remained"
         return result
 
     result["affected_pages"] = [
@@ -208,11 +274,23 @@ def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict
         )
     except Exception as exc:
         result.update({"repair_status": "failed", "reason": "update_failed"})
+        if bold_attempted:
+            result["bold_repair_status"] = "failed"
+            for item in result["bold_affected_pages"]:
+                if item["status"] == "repaired":
+                    item["status"] = "failed"
+                    item["reason"] = "update_failed"
         if http_status_of(exc) is not None:
             result["http_status"] = http_status_of(exc)
         return result
     if not _write_response_is_valid(response):
         result.update({"repair_status": "failed", "reason": "update_response_unverified"})
+        if bold_attempted:
+            result["bold_repair_status"] = "failed"
+            for item in result["bold_affected_pages"]:
+                if item["status"] == "repaired":
+                    item["status"] = "failed"
+                    item["reason"] = "update_response_unverified"
         return result
     result.update({"repair_status": "repaired", "reason": "completed"})
     return result

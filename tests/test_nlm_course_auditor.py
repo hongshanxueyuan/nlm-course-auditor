@@ -2013,6 +2013,123 @@ def test_authenticated_repair_uses_full_play_config_and_csrf_on_update_and_verti
     assert report["repair_summary"]["targets"][0]["publish_status"] == "completed"
 
 
+def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_result(tmp_path):
+    config_path = tenant_config(tmp_path)
+    original = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 3, "time": 12, "subtitle": "** private bold wording **"},
+        {"page": 4, "time": 18, "subtitle": "Already **valid bold** wording"},
+    ]}}
+    client = MutableFakeStudioClient(original)
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "bold-repair",
+        audited_at="2026-11-03T01:02:03Z",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == [{
+        "show_subtitles": True,
+        "time_config": [
+            {"page": 3, "time": 12, "subtitle": "**private bold wording**"},
+            {"page": 4, "time": 18, "subtitle": "Already **valid bold** wording"},
+        ],
+    }]
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+        ("publish_vertical", VERTICAL),
+    ]
+    bold_check = next(
+        check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-012"
+    )
+    assert bold_check["status"] == "pass"
+    assert report["repair_summary"]["targets"][0]["galleries"][0]["bold_repair_status"] == "repaired"
+    report_text = json.dumps(report, ensure_ascii=False)
+    assert "private bold wording" not in report_text
+
+
+@pytest.mark.parametrize(("subtitle", "expected_reason"), [
+    ("** confidential unpaired wording", "unpaired_delimiter"),
+    ("** confidential first ** second ** third **", "ambiguous_bold_span"),
+    ("a** confidential . **a", "normalization_unverified"),
+])
+def test_unpaired_ambiguous_and_still_invalid_bold_syntax_is_not_written(
+    tmp_path, subtitle, expected_reason
+):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"time_config": [
+        {"page": 6, "subtitle": subtitle},
+        {"page": 7, "subtitle": "clean subtitle"},
+    ]}})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "bold-skip",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == []
+    assert not any(call[0] == "publish_vertical" for call in client.calls)
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "skipped"
+    assert gallery_result["bold_repair_status"] == "skipped"
+    expected_counts = {
+        "unpaired_delimiter": 1,
+        "ambiguous_bold_span": 4,
+        "normalization_unverified": 2,
+    }
+    assert gallery_result["bold_affected_pages"] == [{
+        "page": 6,
+        "unrecognized_bold_count": expected_counts[expected_reason],
+        "status": "skipped",
+        "reason": expected_reason,
+    }]
+    bold_check = next(
+        check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-012"
+    )
+    assert bold_check["status"] == "issue"
+    assert subtitle not in json.dumps(report, ensure_ascii=False)
+
+
+def test_leading_marker_and_bold_spacing_repairs_share_one_gallery_update(tmp_path):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 8, "subtitle": "> ** confidential shared repair **"},
+        {"page": 9, "subtitle": "unchanged wording"},
+    ]}})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "combined-repair",
+        output=io.StringIO(),
+    )
+
+    assert len(client.updated_configs) == 1
+    assert client.updated_configs[0]["time_config"] == [
+        {"page": 8, "subtitle": "**confidential shared repair**"},
+        {"page": 9, "subtitle": "unchanged wording"},
+    ]
+    assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+        ("publish_vertical", VERTICAL),
+    ]
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-010"]["status"] == "pass"
+    assert checks["NLMCA-012"]["status"] == "pass"
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "repaired"
+    assert gallery_result["bold_repair_status"] == "repaired"
+
+
 def test_missing_authentication_writes_global_unverified_report_without_studio_reads(tmp_path):
     config_path = tenant_config(tmp_path)
     sessions = []
