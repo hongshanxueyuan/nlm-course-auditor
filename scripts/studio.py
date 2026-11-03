@@ -43,7 +43,7 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-class StudioApiReader:
+class StudioApiClient:
     """Authenticated Studio client with a narrow allowlist of audit operations."""
 
     def __init__(
@@ -176,16 +176,6 @@ class StudioApiReader:
                 )
         return payload
 
-    def _write_json_response(self, response: Any, stage: str) -> dict[str, Any]:
-        payload = self._json_response(response, stage)
-        if (
-            not isinstance(payload, dict)
-            or payload.get("success") is False
-            or any(key in payload for key in ("error", "errors", "detail"))
-        ):
-            raise StudioReadError(stage, f"Studio {stage} response could not be verified.")
-        return payload
-
     def _csrf(self) -> str:
         if self.csrf_token:
             return self.csrf_token
@@ -276,7 +266,7 @@ class StudioApiReader:
             raise
         except requests.RequestException as exc:
             raise StudioReadError(handler, f"Studio {handler} request failed.") from exc
-        return self._write_json_response(response, handler)
+        return self._json_response(response, handler)
 
     def get_files(self, gallery_locator: str) -> Any:
         return self._post_gallery_read(gallery_locator, "get_files", {"current_page": 0, "page_size": 100})
@@ -318,4 +308,4 @@ class StudioApiReader:
             raise
         except requests.RequestException as exc:
             raise StudioReadError("publish_vertical", "Studio vertical publish request failed.") from exc
-        return self._write_json_response(response, "publish_vertical")
+        return self._json_response(response, "publish_vertical")
