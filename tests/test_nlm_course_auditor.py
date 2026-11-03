@@ -2031,7 +2031,7 @@ def test_authenticated_repair_uses_full_play_config_and_csrf_on_update_and_verti
 
 def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_result(tmp_path):
     config_path = tenant_config(tmp_path)
-    original = {"play_config": {"show_subtitles": True, "time_config": [
+    original = {"play_config": {"time_config": [
         {"page": 3, "start": 0, "end": 12, "subtitle": "** private bold wording **"},
         {"page": 4, "start": 12, "end": 30, "subtitle": "Already **valid bold** wording"},
     ]}}
@@ -2048,7 +2048,6 @@ def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_resu
     )
 
     assert client.updated_configs == [{
-        "show_subtitles": True,
         "time_config": [
             {"page": 3, "start": 0, "end": 12, "subtitle": "**private bold wording**"},
             {"page": 4, "start": 12, "end": 30, "subtitle": "Already **valid bold** wording"},
@@ -2195,7 +2194,7 @@ def test_safe_leading_marker_repair_is_not_blocked_by_unpaired_bold_delimiter(tm
     assert repair["bold_affected_pages"][0]["reason"] == "unpaired_delimiter"
 
 
-@pytest.mark.parametrize("missing_field", ["show_subtitles", "page", "start", "end"])
+@pytest.mark.parametrize("missing_field", ["page", "start", "end"])
 def test_incomplete_play_config_is_skipped_before_any_write_and_reaudited(tmp_path, missing_field):
     config_path = tenant_config(tmp_path)
     complete_config = {"play_config": {"show_subtitles": True, "time_config": [
@@ -2234,6 +2233,7 @@ def test_incomplete_play_config_is_skipped_before_any_write_and_reaudited(tmp_pa
 
 
 @pytest.mark.parametrize(("invalid_field", "invalid_value"), [
+    ("show_subtitles", "true"),
     ("start", "0"),
     ("start", True),
     ("start", -1),
@@ -2242,7 +2242,7 @@ def test_incomplete_play_config_is_skipped_before_any_write_and_reaudited(tmp_pa
     ("end", -1),
     ("range", None),
 ])
-def test_invalid_play_config_timing_values_are_skipped_before_any_write(tmp_path, invalid_field, invalid_value):
+def test_invalid_play_config_values_are_skipped_before_any_write(tmp_path, invalid_field, invalid_value):
     config_path = tenant_config(tmp_path)
     complete_config = {"play_config": {"show_subtitles": True, "time_config": [
         {"page": 1, "start": 0, "end": 5, "subtitle": "> repair candidate"},
@@ -2250,7 +2250,9 @@ def test_invalid_play_config_timing_values_are_skipped_before_any_write(tmp_path
     ]}}
     invalid_config = copy.deepcopy(complete_config)
     first_page = invalid_config["play_config"]["time_config"][0]
-    if invalid_field == "range":
+    if invalid_field == "show_subtitles":
+        invalid_config["play_config"][invalid_field] = invalid_value
+    elif invalid_field == "range":
         first_page.update({"start": 10, "end": 5})
     else:
         first_page[invalid_field] = invalid_value
@@ -2376,7 +2378,7 @@ def test_uat_shaped_play_config_repairs_and_preserves_timing_contract(tmp_path):
     expected_play_config["time_config"][0]["subtitle"] = "[REDACTED page 1 subtitle]"
     assert client.updated_configs == [expected_play_config]
     updated_play_config = client.updated_configs[0]
-    assert updated_play_config["show_subtitles"] == original_play_config["show_subtitles"]
+    assert "show_subtitles" not in updated_play_config
     for original_page, updated_page in zip(
         original_play_config["time_config"], expected_play_config["time_config"]
     ):

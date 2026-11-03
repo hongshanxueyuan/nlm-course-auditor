@@ -216,7 +216,10 @@ def _complete_play_config(payload: Any) -> dict[str, Any] | None:
     time_config = play_config.get("time_config") if isinstance(play_config, dict) else None
     if (
         not isinstance(play_config, dict)
-        or not isinstance(play_config.get("show_subtitles"), bool)
+        or (
+            "show_subtitles" in play_config
+            and not isinstance(play_config.get("show_subtitles"), bool)
+        )
         or not isinstance(time_config, list)
         or not time_config
     ):
