@@ -12,9 +12,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.audit import (
-    StudioReader,
+    StudioRepairClient,
     atomic_write_json,
-    authenticated_read,
+    authenticated_studio_call,
     audit_course,
     http_status_of,
     normalize_unrecognized_bold_spacing,
@@ -25,7 +25,7 @@ from scripts.audit import (
 )
 from scripts.errors import AuditAuthenticationError, AuditError, StudioReadError
 from scripts.inputs import SAFE_BLOCK_LOCATOR_PATTERN, VERTICAL_LOCATOR_PATTERN, resolve_audit_input
-from scripts.studio import StudioApiReader
+from scripts.studio import StudioApiClient
 
 
 def run_audit_request(
@@ -35,7 +35,7 @@ def run_audit_request(
     tenant: str | None = None,
     course_id: str | None = None,
     studio_url: str | None = None,
-    reader_factory: Callable[..., StudioReader] | None = None,
+    reader_factory: Callable[..., StudioRepairClient] | None = None,
     environ: dict[str, str] | None = None,
     audited_at: str | None = None,
     output: TextIO | None = None,
@@ -47,11 +47,11 @@ def run_audit_request(
         studio_url=studio_url,
         tenant_config_path=Path(tenant_config_path).expanduser().resolve(),
     )
-    factory = reader_factory or StudioApiReader
+    factory = reader_factory or StudioApiClient
     output_dir = Path(working_directory) / "auditor" / resolved_course_id.replace(":", "_")
     snapshot_path = output_dir / "course-structure.json"
     try:
-        reader = factory(
+        studio_client = factory(
             studio_base=studio_base,
             courses_base=courses_base,
             course_id=resolved_course_id,
@@ -72,7 +72,7 @@ def run_audit_request(
     initial_report = audit_course(
         tenant=resolved_tenant,
         course_id=resolved_course_id,
-        studio_reader=reader,
+        studio_reader=studio_client,
         working_directory=working_directory,
         audited_at=audited_at,
         output=io.StringIO(),
@@ -85,11 +85,11 @@ def run_audit_request(
     }
     final_report = initial_report
     if candidates:
-        repair_summary["targets"] = _repair_subtitle_candidates(reader, candidates)
+        repair_summary["targets"] = _repair_subtitle_candidates(studio_client, candidates)
         final_report = audit_course(
             tenant=resolved_tenant,
             course_id=resolved_course_id,
-            studio_reader=reader,
+            studio_reader=studio_client,
             working_directory=working_directory,
             audited_at=audited_at,
             output=io.StringIO(),
@@ -158,10 +158,22 @@ def _subtitle_repair_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
 def _complete_play_config(payload: Any) -> dict[str, Any] | None:
     play_config = payload.get("play_config") if isinstance(payload, dict) else None
     time_config = play_config.get("time_config") if isinstance(play_config, dict) else None
-    if not isinstance(play_config, dict) or not isinstance(time_config, list) or not time_config:
+    if (
+        not isinstance(play_config, dict)
+        or not isinstance(play_config.get("show_subtitles"), bool)
+        or not isinstance(time_config, list)
+        or not time_config
+    ):
         return None
     if any(
         not isinstance(item, dict)
+        or not isinstance(item.get("page"), int)
+        or isinstance(item.get("page"), bool)
+        or item["page"] <= 0
+        or "time" not in item
+        or not isinstance(item["time"], (int, float, str))
+        or isinstance(item["time"], bool)
+        or isinstance(item["time"], str) and not item["time"].strip()
         or not isinstance(item.get("subtitle"), str)
         or not item["subtitle"].strip()
         for item in time_config
@@ -178,7 +190,7 @@ def _write_response_is_valid(payload: Any) -> bool:
     )
 
 
-def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict[str, Any]:
+def _repair_one_gallery(studio_client: StudioRepairClient, candidate: dict[str, Any]) -> dict[str, Any]:
     bold_attempted = "bold" in candidate["repair_types"]
     result = {
         "gallery_locator": candidate["gallery_locator"],
@@ -194,10 +206,10 @@ def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict
         "unrecognized_bold_count": candidate["unrecognized_bold_count"],
     }
     try:
-        payload = authenticated_read(
-            reader,
+        payload = authenticated_studio_call(
+            studio_client,
             "get_play_config",
-            lambda: reader.get_play_config(candidate["gallery_locator"]),
+            lambda: studio_client.get_play_config(candidate["gallery_locator"]),
         )
     except Exception as exc:
         if http_status_of(exc) is not None:
@@ -238,9 +250,8 @@ def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict
                 "status": bold_status,
                 "reason": reason,
             })
-            if bold_subtitle is None:
-                continue
-            updated_subtitle = bold_subtitle
+            if bold_subtitle is not None:
+                updated_subtitle = bold_subtitle
         if updated_subtitle != subtitle:
             item["subtitle"] = updated_subtitle
             if marker_count:
@@ -267,10 +278,10 @@ def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict
     ]
     result["marker_count"] = sum(page_counts.values())
     try:
-        response = authenticated_read(
-            reader,
+        response = authenticated_studio_call(
+            studio_client,
             "update_play_config",
-            lambda: reader.update_play_config(candidate["gallery_locator"], play_config),
+            lambda: studio_client.update_play_config(candidate["gallery_locator"], play_config),
         )
     except Exception as exc:
         result.update({"repair_status": "failed", "reason": "update_failed"})
@@ -296,7 +307,10 @@ def _repair_one_gallery(reader: StudioReader, candidate: dict[str, Any]) -> dict
     return result
 
 
-def _repair_subtitle_candidates(reader: StudioReader, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _repair_subtitle_candidates(
+    studio_client: StudioRepairClient,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     targets_by_vertical: dict[str, dict[str, Any]] = {}
     changed_verticals: set[str] = set()
     for candidate in candidates:
@@ -306,7 +320,7 @@ def _repair_subtitle_candidates(reader: StudioReader, candidates: list[dict[str,
             "publish_status": "not_required",
             "galleries": [],
         })
-        result = _repair_one_gallery(reader, candidate)
+        result = _repair_one_gallery(studio_client, candidate)
         target["galleries"].append(result)
         if result["repair_status"] == "repaired":
             changed_verticals.add(vertical_locator)
@@ -315,10 +329,10 @@ def _repair_subtitle_candidates(reader: StudioReader, candidates: list[dict[str,
         if vertical_locator not in changed_verticals:
             continue
         try:
-            response = authenticated_read(
-                reader,
+            response = authenticated_studio_call(
+                studio_client,
                 "publish_vertical",
-                lambda: reader.publish_vertical(vertical_locator),
+                lambda: studio_client.publish_vertical(vertical_locator),
             )
         except Exception as exc:
             target["publish_status"] = "failed"

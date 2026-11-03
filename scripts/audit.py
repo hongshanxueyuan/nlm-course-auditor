@@ -54,6 +54,8 @@ class StudioReader(Protocol):
 
     def get_audios(self, gallery_locator: str) -> Any: ...
 
+
+class StudioRepairClient(StudioReader, Protocol):
     def update_play_config(self, gallery_locator: str, play_config: dict[str, Any]) -> Any: ...
 
     def publish_vertical(self, vertical_locator: str) -> Any: ...
@@ -401,7 +403,7 @@ def read_failure(stage: str, exc: BaseException) -> dict[str, Any]:
     return evidence
 
 
-def authenticated_read(studio_reader: StudioReader, stage: str, operation: Any) -> Any:
+def authenticated_studio_call(studio_client: StudioReader, stage: str, operation: Any) -> Any:
     refresh_count = 0
     while True:
         try:
@@ -411,7 +413,7 @@ def authenticated_read(studio_reader: StudioReader, stage: str, operation: Any) 
             is_auth_failure = bool(getattr(exc, "auth_failure", False)) or http_status in (401, 403)
             if not is_auth_failure:
                 raise
-            refresh = getattr(studio_reader, "refresh_authentication", None)
+            refresh = getattr(studio_client, "refresh_authentication", None)
             if not callable(refresh) or refresh_count >= MAX_AUTH_REFRESHES:
                 raise GlobalAuthenticationError(stage, http_status) from exc
             refresh_count += 1
@@ -430,7 +432,7 @@ def gallery_checks(
     total_count: int | None = None
     file_failure: dict[str, Any] | None = None
     try:
-        payload = authenticated_read(
+        payload = authenticated_studio_call(
             studio_reader,
             "get_files",
             lambda: studio_reader.get_files(gallery_locator),
@@ -467,7 +469,7 @@ def gallery_checks(
 
     invalid_time_config = False
     try:
-        config_payload = authenticated_read(
+        config_payload = authenticated_studio_call(
             studio_reader,
             "get_play_config",
             lambda: studio_reader.get_play_config(gallery_locator),
@@ -552,7 +554,7 @@ def gallery_checks(
     )
 
     try:
-        audio_payload = authenticated_read(
+        audio_payload = authenticated_studio_call(
             studio_reader,
             "get_audios",
             lambda: studio_reader.get_audios(gallery_locator),
@@ -1190,7 +1192,7 @@ def audit_course(
     snapshot_path = output_dir / "course-structure.json"
     snapshot_path.unlink(missing_ok=True)
     try:
-        course_tree = authenticated_read(
+        course_tree = authenticated_studio_call(
             studio_reader,
             "course_structure",
             lambda: studio_reader.get_course_structure(course_id),
@@ -1233,7 +1235,7 @@ def audit_course(
     publication_tree = None
     publication_read_failure = None
     try:
-        publication_tree = authenticated_read(
+        publication_tree = authenticated_studio_call(
             studio_reader,
             "course_publication_structure",
             lambda: studio_reader.get_course_publication_structure(course_id),
