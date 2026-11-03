@@ -60,6 +60,8 @@ class StudioRepairClient(StudioReader, Protocol):
 
     def publish_vertical(self, vertical_locator: str) -> Any: ...
 
+    def publish_sequential(self, sequential_locator: str) -> Any: ...
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")

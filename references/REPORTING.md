@@ -11,7 +11,7 @@
 
 ## 报告内容与安全边界
 
-报告包含租户和课程身份、`schema_version`、审核时间、总体状态及状态数量、课程级 `course_findings`、每个目标 vertical 的检查结果，以及所有 sequential 小节的发布检查和 Studio 直达链接。检查规则与 ID 见[检查清单](CHECKLIST.md)。
+报告包含租户和课程身份、`schema_version`、审核时间、总体状态及状态数量、课程级 `course_findings`、每个目标 vertical 的检查结果，以及所有 sequential 小节的发布检查和 Studio 直达链接。普通运行发生写入时，`repair_summary` 还记录字幕修复、vertical 发布和 sequential 自动发布结果。检查规则与 ID 见[检查清单](CHECKLIST.md)。
 
 报告只保留数量、页码、组件名称/类别、安全 locator 和脱敏后的简短读取诊断；不保存 API payload、原始异常或服务端响应、凭据、Cookie、token、HTML 正文、字幕原文、媒体文件名或媒体 URL。位置证据只包含组件总数、目标组件位置和首末组件类别及名称。
 
