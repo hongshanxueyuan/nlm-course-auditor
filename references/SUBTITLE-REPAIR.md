@@ -17,7 +17,7 @@
 - 自动修复只删除保存文本中的原始 `>`、`&gt;` 或无分号 `&gt` 前缀及其分隔空格。字幕其他部分保持原始编码和文字。
 - 更新整页字幕时保留页码、时间、音频绑定和该页的其他字段；配置中 `show_subtitles` 和其余字段原样保留。
 - 只有完整 `play_config`、`time_config` 列表及其中所有字幕都可读取时才写入。更新响应无法确认成功时，不发布该 vertical。
-- 写入前还要确认 `show_subtitles` 是布尔值，且每个 `time_config` 条目有正整数 `page`、非空 `time` 值和非空字幕；缺少任一项时跳过整个 Gallery。
+- 写入前还要确认 `show_subtitles` 是布尔值，且每个 `time_config` 条目有正整数 `page`、有效的 `start` 与 `end` 值和非空字幕；`start` / `end` 接受非空字符串或数字，不接受布尔值、空字符串或复合值。缺少或无效时跳过整个 Gallery。写入只改字幕并完整保留这两个边界值。
 - 某个 vertical 中多个 Gallery 更新成功后，只发布一次。没有任何 Gallery 成功更新的 vertical 不发布。
 - 初审读取不到完整字幕时，NLMCA-010 是 `unverified`，不会成为修复候选。局部修复证据不完整时记录为跳过，其他可确认的 Gallery 继续处理。
 

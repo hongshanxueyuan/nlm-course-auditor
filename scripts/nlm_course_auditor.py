@@ -170,10 +170,13 @@ def _complete_play_config(payload: Any) -> dict[str, Any] | None:
         or not isinstance(item.get("page"), int)
         or isinstance(item.get("page"), bool)
         or item["page"] <= 0
-        or "time" not in item
-        or not isinstance(item["time"], (int, float, str))
-        or isinstance(item["time"], bool)
-        or isinstance(item["time"], str) and not item["time"].strip()
+        or any(
+            field not in item
+            or not isinstance(item[field], (int, float, str))
+            or isinstance(item[field], bool)
+            or isinstance(item[field], str) and not item[field].strip()
+            for field in ("start", "end")
+        )
         or not isinstance(item.get("subtitle"), str)
         or not item["subtitle"].strip()
         for item in time_config
