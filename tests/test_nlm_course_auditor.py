@@ -2070,7 +2070,7 @@ def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_resu
 @pytest.mark.parametrize(("subtitle", "expected_reason"), [
     ("** confidential unpaired wording", "unpaired_delimiter"),
     ("** confidential first ** second ** third **", "ambiguous_bold_span"),
-    ("a**confidential**b", "spacing_not_repairable"),
+    ("a**.confidential**b", "spacing_not_repairable"),
 ])
 def test_unpaired_bold_is_skipped_and_unrepairable_bold_delimiters_are_removed(
     tmp_path, subtitle, expected_reason
