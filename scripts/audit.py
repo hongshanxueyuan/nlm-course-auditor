@@ -830,7 +830,34 @@ def markdown_bold_delimiter_counts(markdown: str) -> tuple[int, int]:
     return candidate_count, recognized_count
 
 
+def remove_unescaped_bold_delimiters(markdown: str) -> str | None:
+    runs = unescaped_bold_runs(markdown)
+    edits: list[tuple[int, int]] = []
+    for start, end in runs:
+        delimiter_end = start + ((end - start) // 2) * 2
+        if delimiter_end > start:
+            edits.append((start, delimiter_end))
+    if not edits:
+        return None
+
+    updated = markdown
+    for start, end in reversed(edits):
+        updated = updated[:start] + updated[end:]
+
+    remaining_candidates, remaining_recognized = markdown_bold_delimiter_counts(updated)
+    if remaining_candidates != remaining_recognized:
+        return None
+    return updated
+
+
 def normalize_unrecognized_bold_spacing(markdown: str) -> tuple[str | None, str]:
+    def unrepairable(reason: str) -> tuple[str | None, str]:
+        if reason in {"ambiguous_bold_span", "spacing_not_repairable"}:
+            updated = remove_unescaped_bold_delimiters(markdown)
+            if updated is not None:
+                return updated, "bold_delimiters_removed"
+        return None, reason
+
     candidate_count, recognized_count = markdown_bold_delimiter_counts(markdown)
     if candidate_count == recognized_count:
         return markdown, "already_recognized"
@@ -840,11 +867,11 @@ def normalize_unrecognized_bold_spacing(markdown: str) -> tuple[str | None, str]
         sum((end - start) // 2 for start, end in runs) != candidate_count
         or any(end - start != 2 for start, end in runs)
     ):
-        return None, "ambiguous_bold_span"
+        return unrepairable("ambiguous_bold_span")
     if len(runs) == 1:
         return None, "unpaired_delimiter"
     if len(runs) != 2 or candidate_count != 2:
-        return None, "ambiguous_bold_span"
+        return unrepairable("ambiguous_bold_span")
 
     updated = markdown
     edits: list[tuple[int, int, str]] = []
@@ -852,16 +879,16 @@ def normalize_unrecognized_bold_spacing(markdown: str) -> tuple[str | None, str]
         open_end = opening[1]
         close_start = closing[0]
         if "\n" in markdown[open_end:close_start]:
-            return None, "ambiguous_bold_span"
+            return unrepairable("ambiguous_bold_span")
         contents = markdown[open_end:close_start]
         normalized_contents = contents.lstrip(" \t").rstrip(" \t")
         if not normalized_contents:
-            return None, "ambiguous_bold_span"
+            return unrepairable("ambiguous_bold_span")
         if normalized_contents != contents:
             edits.append((open_end, close_start, normalized_contents))
 
     if not edits:
-        return None, "spacing_not_repairable"
+        return unrepairable("spacing_not_repairable")
     for start, end, replacement in reversed(edits):
         updated = updated[:start] + replacement + updated[end:]
 

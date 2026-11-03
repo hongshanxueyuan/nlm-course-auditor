@@ -2070,9 +2070,9 @@ def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_resu
 @pytest.mark.parametrize(("subtitle", "expected_reason"), [
     ("** confidential unpaired wording", "unpaired_delimiter"),
     ("** confidential first ** second ** third **", "ambiguous_bold_span"),
-    ("a** confidential . **a", "normalization_unverified"),
+    ("a**confidential**b", "spacing_not_repairable"),
 ])
-def test_unpaired_ambiguous_and_still_invalid_bold_syntax_is_not_written(
+def test_unpaired_bold_is_skipped_and_unrepairable_bold_delimiters_are_removed(
     tmp_path, subtitle, expected_reason
 ):
     config_path = tenant_config(tmp_path)
@@ -2090,27 +2090,43 @@ def test_unpaired_ambiguous_and_still_invalid_bold_syntax_is_not_written(
         output=io.StringIO(),
     )
 
-    assert client.updated_configs == []
-    assert not any(call[0] == "publish_vertical" for call in client.calls)
     assert [call[0] for call in client.calls].count("get_course_structure") == 2
     gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
-    assert gallery_result["repair_status"] == "skipped"
-    assert gallery_result["bold_repair_status"] == "skipped"
+    should_remove_delimiters = expected_reason in {
+        "ambiguous_bold_span",
+        "spacing_not_repairable",
+    }
+    if should_remove_delimiters:
+        assert client.updated_configs[0]["time_config"][0]["subtitle"] == subtitle.replace("**", "")
+        assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+            ("publish_vertical", VERTICAL),
+        ]
+        assert gallery_result["repair_status"] == "repaired"
+        assert gallery_result["bold_repair_status"] == "repaired"
+        expected_status = "repaired"
+        expected_result_reason = "bold_delimiters_removed"
+    else:
+        assert client.updated_configs == []
+        assert not any(call[0] == "publish_vertical" for call in client.calls)
+        assert gallery_result["repair_status"] == "skipped"
+        assert gallery_result["bold_repair_status"] == "skipped"
+        expected_status = "skipped"
+        expected_result_reason = expected_reason
     expected_counts = {
         "unpaired_delimiter": 1,
         "ambiguous_bold_span": 4,
-        "normalization_unverified": 2,
+        "spacing_not_repairable": 2,
     }
     assert gallery_result["bold_affected_pages"] == [{
         "page": 6,
         "unrecognized_bold_count": expected_counts[expected_reason],
-        "status": "skipped",
-        "reason": expected_reason,
+        "status": expected_status,
+        "reason": expected_result_reason,
     }]
     bold_check = next(
         check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-012"
     )
-    assert bold_check["status"] == "issue"
+    assert bold_check["status"] == ("pass" if should_remove_delimiters else "issue")
     assert subtitle not in json.dumps(report, ensure_ascii=False)
 
 
