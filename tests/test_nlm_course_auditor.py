@@ -1,5 +1,7 @@
 import copy
+import io
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 import pytest
 
@@ -10,6 +12,7 @@ from scripts.nlm_course_auditor import StudioReadError, audit_course
 COURSE_KEY = "course-v1:FIRAx+1040663+20261018"
 VERTICAL = "block-v1:FIRAx+1040663+20261018+type@vertical+block@lesson1"
 GALLERY = "block-v1:FIRAx+1040663+20261018+type@imagesgallery+block@gallery1"
+GALLERY_EXTRA = "block-v1:FIRAx+1040663+20261018+type@imagesgallery+block@gallery1b"
 
 
 class FakeStudioReader:
@@ -106,6 +109,91 @@ class FakeReaderFactory:
         return self.reader
 
 
+class MutableFakeStudioClient(FakeStudioReader):
+    def __init__(
+        self,
+        play_config,
+        *,
+        play_configs=None,
+        unreadable_on_repair=(),
+        repair_config_overrides=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.play_config = copy.deepcopy(play_config)
+        self.play_configs = {GALLERY: self.play_config}
+        self.play_configs.update(copy.deepcopy(play_configs or {}))
+        self.unreadable_on_repair = set(unreadable_on_repair)
+        self.repair_config_overrides = copy.deepcopy(repair_config_overrides or {})
+        self.play_config_reads = {}
+        self.calls = []
+        self.updated_configs = []
+        self.update_response = {"ok": True}
+        self.publish_response = {"ok": True}
+
+    def _update_sequential_state(self, locator, **values):
+        def contains(node):
+            if node.get("id") == locator:
+                return True
+            child_info = node.get("child_info")
+            children = child_info.get("children", []) if isinstance(child_info, dict) else []
+            return any(contains(child) for child in children if isinstance(child, dict))
+
+        def visit(node):
+            child_info = node.get("child_info")
+            children = child_info.get("children", []) if isinstance(child_info, dict) else []
+            if node.get("category") == "sequential" and contains(node):
+                node.update(values)
+            for child in children:
+                if isinstance(child, dict):
+                    visit(child)
+
+        visit(self.course_tree)
+
+    def get_course_structure(self, course_id):
+        self.calls.append(("get_course_structure", course_id))
+        return self.course_tree
+
+    def get_course_publication_structure(self, course_id):
+        self.calls.append(("get_course_publication_structure", course_id))
+        return self.publication_tree
+
+    def get_files(self, gallery_locator):
+        self.calls.append(("get_files", gallery_locator))
+        return self._gallery_response("files", {
+            "files": [{"id": "asset-1"}, {"id": "asset-2"}],
+            "total_count": 2,
+        })
+
+    def get_play_config(self, gallery_locator):
+        self.calls.append(("get_play_config", gallery_locator))
+        read_count = self.play_config_reads.get(gallery_locator, 0) + 1
+        self.play_config_reads[gallery_locator] = read_count
+        if gallery_locator in self.unreadable_on_repair and read_count >= 2:
+            return {"play_config": {"time_config": "unreadable"}}
+        if gallery_locator in self.repair_config_overrides and read_count >= 2:
+            return copy.deepcopy(self.repair_config_overrides[gallery_locator])
+        return copy.deepcopy(self.play_configs.get(gallery_locator, self.play_config))
+
+    def get_audios(self, gallery_locator):
+        self.calls.append(("get_audios", gallery_locator))
+        return self._gallery_response("audios", {"audios": [{"id": "audio-1"}]})
+
+    def update_play_config(self, gallery_locator, play_config):
+        self.calls.append(("update_play_config", gallery_locator))
+        if isinstance(self.update_response, dict) and self.update_response.get("success", True) is not False:
+            self.play_configs[gallery_locator] = {"play_config": copy.deepcopy(play_config)}
+            self._update_sequential_state(gallery_locator, has_changes=True)
+        self.updated_configs.append(copy.deepcopy(play_config))
+        return copy.deepcopy(self.update_response)
+
+    def publish_vertical(self, vertical_locator):
+        self.calls.append(("publish_vertical", vertical_locator))
+        if isinstance(self.publish_response, dict) and self.publish_response.get("success", True) is not False:
+            self._update_sequential_state(vertical_locator, published=True, has_changes=False, visibility_state="live")
+        return copy.deepcopy(self.publish_response)
+
+
 class FakeCookie:
     def __init__(self, name, value, domain):
         self.name = name
@@ -134,13 +222,17 @@ class FakeHttpResponse:
 
 
 class FakeHttpSession:
-    def __init__(self, *, sessions, course_tree, publication_tree=None, auth_failures=None):
+    def __init__(self, *, sessions, course_tree, publication_tree=None, auth_failures=None, play_config=None):
         self.headers = {}
         self.cookies = FakeCookieJar()
         self.sessions = sessions
         self.course_tree = course_tree
         self.publication_tree = publication_tree if publication_tree is not None else course_tree
         self.auth_failures = auth_failures if auth_failures is not None else [0]
+        self.play_config = play_config or {"play_config": {"time_config": [
+            {"page": 1, "subtitle": "Saved subtitle for page one"},
+            {"page": 2, "subtitle": "Saved subtitle for page two"},
+        ]}}
         self.calls = []
         sessions.append(self)
 
@@ -155,12 +247,14 @@ class FakeHttpSession:
                 return FakeHttpResponse({"error": "Not Login yet"})
             return FakeHttpResponse({"files": [{"id": "asset-1"}, {"id": "asset-2"}], "total_count": 2})
         if parsed.path.endswith("/handler/get_play_config"):
-            return FakeHttpResponse({"play_config": {"time_config": [
-                {"page": 1, "subtitle": "Saved subtitle for page one"},
-                {"page": 2, "subtitle": "Saved subtitle for page two"},
-            ]}})
+            return FakeHttpResponse(copy.deepcopy(self.play_config))
         if parsed.path.endswith("/handler/get_audios"):
             return FakeHttpResponse({"audios": [{"id": "audio-secret"}]})
+        if parsed.path.endswith("/handler/update_play_config"):
+            self.play_config = copy.deepcopy(kwargs.get("json"))
+            return FakeHttpResponse({"ok": True})
+        if parsed.path == f"/xblock/{VERTICAL}":
+            return FakeHttpResponse({"ok": True})
         raise AssertionError(f"Unexpected POST path: {parsed.path}")
 
     def get(self, url, **kwargs):
@@ -248,6 +342,33 @@ def course_tree_with_one_target():
             ]
         },
     }
+
+
+def course_tree_with_multiple_repair_targets():
+    tree = course_tree_with_one_target()
+    chapter = tree["child_info"]["children"][0]
+    first_sequential = chapter["child_info"]["children"][0]
+    first_vertical = first_sequential["child_info"]["children"][0]
+    first_vertical["child_info"]["children"].insert(1, {
+        "id": GALLERY_EXTRA,
+        "category": "imagesgallery",
+        "display_name": "补充讲解",
+    })
+
+    second_sequential = copy.deepcopy(first_sequential)
+    second_sequential["id"] = second_sequential["id"].replace("block@section1", "block@section2")
+    second_sequential["display_name"] = "第二节"
+    second_vertical = second_sequential["child_info"]["children"][0]
+    second_vertical["id"] = second_vertical["id"].replace("block@lesson1", "block@lesson2")
+    second_vertical["child_info"]["children"].pop(1)
+    second_gallery = second_vertical["child_info"]["children"][0]
+    second_gallery["id"] = second_gallery["id"].replace("block@gallery1", "block@gallery2")
+    second_summary = second_vertical["child_info"]["children"][1]
+    second_summary["id"] = second_summary["id"].replace("block@summary", "block@summary2")
+    second_non_target = second_sequential["child_info"]["children"][1]
+    second_non_target["id"] = second_non_target["id"].replace("block@not-target", "block@not-target2")
+    chapter["child_info"]["children"].append(second_sequential)
+    return tree, second_vertical["id"], second_gallery["id"]
 
 
 def test_complete_audit_reads_one_snapshot_saves_safe_report_and_prints(tmp_path, capsys):
@@ -1564,6 +1685,216 @@ def test_explicit_pair_and_url_resolve_to_the_same_course_and_studio_links(tmp_p
     assert explicit_report["target_sections"][0]["studio_url"] == url_report["target_sections"][0]["studio_url"]
 
 
+def test_default_run_repairs_saved_leading_markers_then_publishes_and_reaudits(tmp_path):
+    config_path = tenant_config(tmp_path)
+    original_config = {
+        "show_subtitles": True,
+        "voice_mode": "narration",
+        "time_config": [
+            {
+                "page": 4,
+                "start": 120,
+                "end": 135,
+                "subtitle": "  > raw marker text",
+                "audio_id": "audio-page-four",
+                "custom": {"keep": "page-four"},
+            },
+            {
+                "page": 9,
+                "start": 180,
+                "end": 198,
+                "subtitle": "&gt; entity marker\n&gt semicolonless marker",
+                "audio_id": "audio-page-nine",
+            },
+        ],
+    }
+    reader = MutableFakeStudioClient({"play_config": original_config})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(reader),
+        working_directory=tmp_path / "default-repair",
+        audited_at="2026-10-28T01:02:03Z",
+    )
+
+    assert reader.calls == [
+        ("get_course_structure", COURSE_KEY),
+        ("get_course_publication_structure", COURSE_KEY),
+        ("get_files", GALLERY),
+        ("get_play_config", GALLERY),
+        ("get_audios", GALLERY),
+        ("get_play_config", GALLERY),
+        ("update_play_config", GALLERY),
+        ("publish_vertical", VERTICAL),
+        ("get_course_structure", COURSE_KEY),
+        ("get_course_publication_structure", COURSE_KEY),
+        ("get_files", GALLERY),
+        ("get_play_config", GALLERY),
+        ("get_audios", GALLERY),
+    ]
+    assert reader.updated_configs == [{
+        "show_subtitles": True,
+        "voice_mode": "narration",
+        "time_config": [
+            {
+                "page": 4,
+                "start": 120,
+                "end": 135,
+                "subtitle": "raw marker text",
+                "audio_id": "audio-page-four",
+                "custom": {"keep": "page-four"},
+            },
+            {
+                "page": 9,
+                "start": 180,
+                "end": 198,
+                "subtitle": "entity marker\nsemicolonless marker",
+                "audio_id": "audio-page-nine",
+            },
+        ],
+    }]
+    assert next(check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-010")["status"] == "pass"
+    assert report["repair_summary"]["mode"] == "repair"
+    assert report["repair_summary"]["targets"][0]["publish_status"] == "completed"
+    report_text = json.dumps(report, ensure_ascii=False)
+    assert "raw marker text" not in report_text
+    assert "entity marker" not in report_text
+
+
+def test_audit_only_reports_leading_markers_without_any_studio_writes(tmp_path):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"time_config": [
+        {"page": 1, "subtitle": "> leave this untouched"},
+        {"page": 2, "subtitle": "another page"},
+    ]}})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "audit-only",
+        audit_only=True,
+    )
+
+    assert client.calls == [
+        ("get_course_structure", COURSE_KEY),
+        ("get_course_publication_structure", COURSE_KEY),
+        ("get_files", GALLERY),
+        ("get_play_config", GALLERY),
+        ("get_audios", GALLERY),
+    ]
+    assert client.play_configs[GALLERY]["play_config"]["time_config"][0]["subtitle"] == "> leave this untouched"
+    assert report["repair_summary"] == {"mode": "audit_only", "repair_passes": 0, "targets": []}
+    assert next(check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-010")["status"] == "issue"
+    assert auditor.parse_args(["--audit-only"]).audit_only is True
+
+
+def test_default_run_does_not_repeat_full_audit_when_no_markers_need_repair(tmp_path):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"time_config": [
+        {"page": 1, "subtitle": "paragraph before a heading\n\n# heading"},
+        {"page": 2, "subtitle": "also clean"},
+    ]}})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "no-repair",
+    )
+
+    assert [call[0] for call in client.calls].count("get_course_structure") == 1
+    assert not any(call[0] in {"update_play_config", "publish_vertical"} for call in client.calls)
+    assert report["repair_summary"] == {"mode": "repair", "repair_passes": 0, "targets": []}
+    assert next(check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-011")["status"] == "issue"
+
+
+def test_repair_skips_incomplete_target_groups_gallery_updates_by_vertical_and_continues(tmp_path):
+    config_path = tenant_config(tmp_path)
+    tree, second_vertical, second_gallery = course_tree_with_multiple_repair_targets()
+    shared_config = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> repair this page"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "leave this page"},
+    ]}}
+    client = MutableFakeStudioClient(
+        shared_config,
+        course_tree=tree,
+        play_configs={GALLERY_EXTRA: shared_config, second_gallery: shared_config},
+        unreadable_on_repair={second_gallery},
+    )
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "independent-targets",
+    )
+
+    operations = [call[0] for call in client.calls]
+    assert operations.count("get_course_structure") == 2
+    assert operations.count("get_play_config") == 9
+    assert [call for call in client.calls if call[0] == "update_play_config"] == [
+        ("update_play_config", GALLERY),
+        ("update_play_config", GALLERY_EXTRA),
+    ]
+    assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+        ("publish_vertical", VERTICAL),
+    ]
+    first_target, second_target = report["repair_summary"]["targets"]
+    assert first_target["vertical_locator"] == VERTICAL
+    assert [item["repair_status"] for item in first_target["galleries"]] == ["repaired", "repaired"]
+    assert first_target["publish_status"] == "completed"
+    assert second_target["vertical_locator"] == second_vertical
+    assert second_target["galleries"][0]["repair_status"] == "skipped"
+    assert second_target["galleries"][0]["reason"] == "play_config_unverified"
+    assert second_target["publish_status"] == "not_required"
+    assert next(
+        check
+        for section in report["target_sections"] if section["locator"] == second_vertical
+        for check in section["checks"] if check["check_id"] == "NLMCA-010"
+    )["status"] == "unverified"
+
+
+@pytest.mark.parametrize("failed_stage", ["update", "publish"])
+def test_failed_write_still_finishes_one_final_course_audit(tmp_path, failed_stage):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> approved repair"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "unchanged"},
+    ]}})
+    if failed_stage == "update":
+        client.update_response = None
+    else:
+        client.publish_response = {"success": False}
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / failed_stage,
+    )
+
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    target = report["repair_summary"]["targets"][0]
+    assert target["galleries"][0]["repair_status"] == ("failed" if failed_stage == "update" else "repaired")
+    assert target["publish_status"] == ("not_required" if failed_stage == "update" else "failed")
+    assert ("publish_vertical", VERTICAL) in client.calls if failed_stage == "publish" else not any(
+        call[0] == "publish_vertical" for call in client.calls
+    )
+    final_markers = next(
+        check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-010"
+    )
+    assert final_markers["status"] == ("pass" if failed_stage == "publish" else "issue")
+    if failed_stage == "publish":
+        assert report["sequential_sections"][0]["checks"][0]["status"] == "issue"
+
+
 @pytest.mark.parametrize("auth_mode", ["account", "cookie"])
 def test_complete_authenticated_run_uses_configured_host_and_csrf_for_gallery_reads(tmp_path, auth_mode):
     config_path = tenant_config(
@@ -1583,7 +1914,7 @@ def test_complete_authenticated_run_uses_configured_host_and_csrf_for_gallery_re
     default_vertical.pop("child_info")
 
     def reader_factory(**kwargs):
-        return auditor.StudioApiReader(
+        return auditor.StudioApiClient(
             **kwargs,
             session_factory=lambda: FakeHttpSession(
                 sessions=sessions,
@@ -1636,12 +1967,305 @@ def test_complete_authenticated_run_uses_configured_host_and_csrf_for_gallery_re
         assert secret not in report_text
 
 
+def test_authenticated_repair_uses_full_play_config_and_csrf_on_update_and_vertical_publish(tmp_path, capsys):
+    config_path = tenant_config(tmp_path)
+    sessions = []
+    original = {"play_config": {
+        "show_subtitles": False,
+        "voice_mode": "keep-me",
+        "time_config": [
+            {"page": 1, "start": 0, "end": 5, "subtitle": "> repair this", "audio_id": "audio-1"},
+            {"page": 2, "start": 5, "end": 12, "subtitle": "keep this", "audio_id": "audio-2"},
+        ],
+    }}
+
+    def reader_factory(**kwargs):
+        return auditor.StudioApiClient(
+            **kwargs,
+            session_factory=lambda: FakeHttpSession(
+                sessions=sessions,
+                course_tree=course_tree_with_one_target(),
+                play_config=original,
+            ),
+        )
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=reader_factory,
+        environ={
+            "FIRA_SAAS_OP_COOKIE": "sessionid=cookie-secret",
+            "FIRA_SAAS_OP_CSRF_TOKEN": "cookie-csrf-secret",
+        },
+        working_directory=tmp_path / "authenticated-repair",
+        output=io.StringIO(),
+    )
+
+    writes = [
+        call for session in sessions for call in session.calls
+        if call[0] == "POST" and (
+            call[2].endswith("/handler/update_play_config") or call[2] == f"/xblock/{VERTICAL}"
+        )
+    ]
+    assert [call[2] for call in writes] == [
+        f"/xblock/{GALLERY}/handler/update_play_config",
+        f"/xblock/{VERTICAL}",
+    ]
+    update_request, publish_request = writes
+    assert update_request[3]["json"] == {"play_config": {
+        "show_subtitles": False,
+        "voice_mode": "keep-me",
+        "time_config": [
+            {"page": 1, "start": 0, "end": 5, "subtitle": "repair this", "audio_id": "audio-1"},
+            {"page": 2, "start": 5, "end": 12, "subtitle": "keep this", "audio_id": "audio-2"},
+        ],
+    }}
+    assert publish_request[3]["json"] == {"publish": "make_public"}
+    for request in writes:
+        assert request[3]["headers"]["X-CSRFToken"] == "cookie-csrf-secret"
+        assert request[3]["headers"]["Origin"] == FakeStudioReader.studio_base
+    assert publish_request[3]["headers"]["X-HTTP-Method-Override"] == "PATCH"
+    assert report["repair_summary"]["targets"][0]["publish_status"] == "completed"
+
+
+def test_default_run_repairs_bold_spacing_only_after_commonmark_accepts_the_result(tmp_path):
+    config_path = tenant_config(tmp_path)
+    original = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 3, "start": 0, "end": 12, "subtitle": "** private bold wording **"},
+        {"page": 4, "start": 12, "end": 30, "subtitle": "Already **valid bold** wording"},
+    ]}}
+    client = MutableFakeStudioClient(original)
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "bold-repair",
+        audited_at="2026-11-03T01:02:03Z",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == [{
+        "show_subtitles": True,
+        "time_config": [
+            {"page": 3, "start": 0, "end": 12, "subtitle": "**private bold wording**"},
+            {"page": 4, "start": 12, "end": 30, "subtitle": "Already **valid bold** wording"},
+        ],
+    }]
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+        ("publish_vertical", VERTICAL),
+    ]
+    bold_check = next(
+        check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-012"
+    )
+    assert bold_check["status"] == "pass"
+    assert report["repair_summary"]["targets"][0]["galleries"][0]["bold_repair_status"] == "repaired"
+    report_text = json.dumps(report, ensure_ascii=False)
+    assert "private bold wording" not in report_text
+
+
+@pytest.mark.parametrize(("subtitle", "expected_reason"), [
+    ("** confidential unpaired wording", "unpaired_delimiter"),
+    ("** confidential first ** second ** third **", "ambiguous_bold_span"),
+    ("a** confidential . **a", "normalization_unverified"),
+])
+def test_unpaired_ambiguous_and_still_invalid_bold_syntax_is_not_written(
+    tmp_path, subtitle, expected_reason
+):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 6, "start": 0, "end": 5, "subtitle": subtitle},
+        {"page": 7, "start": 5, "end": 14, "subtitle": "clean subtitle"},
+    ]}})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "bold-skip",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == []
+    assert not any(call[0] == "publish_vertical" for call in client.calls)
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "skipped"
+    assert gallery_result["bold_repair_status"] == "skipped"
+    expected_counts = {
+        "unpaired_delimiter": 1,
+        "ambiguous_bold_span": 4,
+        "normalization_unverified": 2,
+    }
+    assert gallery_result["bold_affected_pages"] == [{
+        "page": 6,
+        "unrecognized_bold_count": expected_counts[expected_reason],
+        "status": "skipped",
+        "reason": expected_reason,
+    }]
+    bold_check = next(
+        check for check in report["target_sections"][0]["checks"] if check["check_id"] == "NLMCA-012"
+    )
+    assert bold_check["status"] == "issue"
+    assert subtitle not in json.dumps(report, ensure_ascii=False)
+
+
+def test_leading_marker_and_bold_spacing_repairs_share_one_gallery_update(tmp_path):
+    config_path = tenant_config(tmp_path)
+    client = MutableFakeStudioClient({"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 8, "start": 0, "end": 5, "subtitle": "> ** confidential shared repair **"},
+        {"page": 9, "start": 5, "end": 14, "subtitle": "unchanged wording"},
+    ]}})
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "combined-repair",
+        output=io.StringIO(),
+    )
+
+    assert len(client.updated_configs) == 1
+    assert client.updated_configs[0]["time_config"] == [
+        {"page": 8, "start": 0, "end": 5, "subtitle": "**confidential shared repair**"},
+        {"page": 9, "start": 5, "end": 14, "subtitle": "unchanged wording"},
+    ]
+    assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+        ("publish_vertical", VERTICAL),
+    ]
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-010"]["status"] == "pass"
+    assert checks["NLMCA-012"]["status"] == "pass"
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "repaired"
+    assert gallery_result["bold_repair_status"] == "repaired"
+
+
+def test_safe_leading_marker_repair_is_not_blocked_by_unpaired_bold_delimiter(tmp_path):
+    config_path = tenant_config(tmp_path)
+    original = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> ** confidential unpaired wording"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "keep this page"},
+    ]}}
+    client = MutableFakeStudioClient(original)
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "independent-page-repair",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == [{"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "** confidential unpaired wording"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "keep this page"},
+    ]}]
+    assert [call for call in client.calls if call[0] == "publish_vertical"] == [
+        ("publish_vertical", VERTICAL),
+    ]
+    checks = {item["check_id"]: item for item in report["target_sections"][0]["checks"]}
+    assert checks["NLMCA-010"]["status"] == "pass"
+    assert checks["NLMCA-012"]["status"] == "issue"
+    repair = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert repair["repair_status"] == "repaired"
+    assert repair["bold_repair_status"] == "skipped"
+    assert repair["bold_affected_pages"][0]["reason"] == "unpaired_delimiter"
+
+
+@pytest.mark.parametrize("missing_field", ["show_subtitles", "page", "start", "end"])
+def test_incomplete_play_config_is_skipped_before_any_write_and_reaudited(tmp_path, missing_field):
+    config_path = tenant_config(tmp_path)
+    complete_config = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> repair candidate"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "untouched page"},
+    ]}}
+    incomplete_config = copy.deepcopy(complete_config)
+    play_config = incomplete_config["play_config"]
+    if missing_field == "show_subtitles":
+        play_config.pop("show_subtitles")
+    else:
+        play_config["time_config"][0].pop(missing_field)
+    client = MutableFakeStudioClient(
+        complete_config,
+        repair_config_overrides={GALLERY: incomplete_config},
+    )
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / f"incomplete-{missing_field}",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == []
+    assert not any(call[0] == "publish_vertical" for call in client.calls)
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "skipped"
+    assert gallery_result["reason"] == "play_config_unverified"
+    assert next(
+        item for item in report["target_sections"][0]["checks"] if item["check_id"] == "NLMCA-010"
+    )["status"] == "issue"
+
+
+@pytest.mark.parametrize(("invalid_field", "invalid_value"), [
+    ("start", "0"),
+    ("start", True),
+    ("start", -1),
+    ("end", "5"),
+    ("end", False),
+    ("end", -1),
+    ("range", None),
+])
+def test_invalid_play_config_timing_values_are_skipped_before_any_write(tmp_path, invalid_field, invalid_value):
+    config_path = tenant_config(tmp_path)
+    complete_config = {"play_config": {"show_subtitles": True, "time_config": [
+        {"page": 1, "start": 0, "end": 5, "subtitle": "> repair candidate"},
+        {"page": 2, "start": 5, "end": 14, "subtitle": "untouched page"},
+    ]}}
+    invalid_config = copy.deepcopy(complete_config)
+    first_page = invalid_config["play_config"]["time_config"][0]
+    if invalid_field == "range":
+        first_page.update({"start": 10, "end": 5})
+    else:
+        first_page[invalid_field] = invalid_value
+    client = MutableFakeStudioClient(
+        complete_config,
+        repair_config_overrides={GALLERY: invalid_config},
+    )
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=config_path,
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / f"invalid-{invalid_field}-{str(invalid_value).lower()}",
+        output=io.StringIO(),
+    )
+
+    assert client.updated_configs == []
+    assert not any(call[0] == "publish_vertical" for call in client.calls)
+    assert [call[0] for call in client.calls].count("get_course_structure") == 2
+    gallery_result = report["repair_summary"]["targets"][0]["galleries"][0]
+    assert gallery_result["repair_status"] == "skipped"
+    assert gallery_result["reason"] == "play_config_unverified"
+
+
 def test_missing_authentication_writes_global_unverified_report_without_studio_reads(tmp_path):
     config_path = tenant_config(tmp_path)
     sessions = []
 
     def reader_factory(**kwargs):
-        return auditor.StudioApiReader(
+        return auditor.StudioApiClient(
             **kwargs,
             session_factory=lambda: FakeHttpSession(sessions=sessions, course_tree=course_tree_with_one_target()),
         )
@@ -1678,7 +2302,7 @@ def test_login_session_refresh_reuses_the_same_course_snapshot_after_auth_handle
     auth_failures = [1]
 
     def reader_factory(**kwargs):
-        return auditor.StudioApiReader(
+        return auditor.StudioApiClient(
             **kwargs,
             session_factory=lambda: FakeHttpSession(
                 sessions=sessions,
@@ -1711,3 +2335,50 @@ def test_login_session_refresh_reuses_the_same_course_snapshot_after_auth_handle
     assert len(sessions) == 2
     assert len(login_calls) == 2
     assert [call[3].get("params") for call in tree_reads] == [{"format": "concise"}, None]
+
+
+def test_uat_shaped_play_config_repairs_and_preserves_timing_contract(tmp_path):
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "studio_play_config_uat_shape_redacted.json"
+    )
+    response = json.loads(fixture_path.read_text(encoding="utf-8"))
+    original_play_config = response["play_config"]
+    client = MutableFakeStudioClient(response)
+
+    report = auditor.run_audit_request(
+        tenant="uat",
+        course_id=COURSE_KEY,
+        tenant_config_path=tenant_config(tmp_path),
+        reader_factory=FakeReaderFactory(client),
+        working_directory=tmp_path / "uat-config-shape",
+        output=io.StringIO(),
+    )
+
+    expected_play_config = copy.deepcopy(original_play_config)
+    expected_play_config["time_config"][0]["subtitle"] = "[REDACTED page 1 subtitle]"
+    assert client.updated_configs == [expected_play_config]
+    updated_play_config = client.updated_configs[0]
+    assert updated_play_config["show_subtitles"] == original_play_config["show_subtitles"]
+    for original_page, updated_page in zip(
+        original_play_config["time_config"], expected_play_config["time_config"]
+    ):
+        assert (updated_page["page"], updated_page["start"], updated_page["end"]) == (
+            original_page["page"], original_page["start"], original_page["end"]
+        )
+
+    update_index = client.calls.index(("update_play_config", GALLERY))
+    publish_index = client.calls.index(("publish_vertical", VERTICAL))
+    audit_indices = [
+        i for i, call in enumerate(client.calls) if call[0] == "get_course_structure"
+    ]
+    assert len(audit_indices) == 2
+    assert update_index < publish_index < audit_indices[-1]
+    marker_check = next(
+        item
+        for item in report["target_sections"][0]["checks"]
+        if item["check_id"] == "NLMCA-010"
+    )
+    assert marker_check["status"] == "pass"
+    assert "[REDACTED page 1 subtitle]" not in json.dumps(report, ensure_ascii=False)

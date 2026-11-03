@@ -31,6 +31,7 @@ SUMMARY_COMPONENT_NAME = "本节要点"
 TIME_CONFIG_EXCEEDS_FILES_HINT = "大概率是 imagegallery 有几页图片未成功上传。"
 INVALID_TIME_CONFIG_HINT = "大概率是 imagegallery 的音频字幕未成功上传。"
 BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:>+ *)+", re.MULTILINE)
+RAW_BLOCKQUOTE_PREFIX_RE = re.compile(r"^ {0,3}(?:(?:>|&gt;?)+ *)+")
 SAVED_SUBTITLE_CHECK_NAME = "Saved Gallery subtitle text has no blockquote prefix risk"
 SUBTITLE_HEADING_ORDER_CHECK_NAME = "Readable Gallery subtitles begin with a paragraph before any Markdown heading"
 SUBTITLE_BOLD_CHECK_NAME = "Saved Gallery subtitles use CommonMark-recognized bold delimiters"
@@ -52,6 +53,12 @@ class StudioReader(Protocol):
     def get_play_config(self, gallery_locator: str) -> Any: ...
 
     def get_audios(self, gallery_locator: str) -> Any: ...
+
+
+class StudioRepairClient(StudioReader, Protocol):
+    def update_play_config(self, gallery_locator: str, play_config: dict[str, Any]) -> Any: ...
+
+    def publish_vertical(self, vertical_locator: str) -> Any: ...
 
 
 def utc_now() -> str:
@@ -396,7 +403,7 @@ def read_failure(stage: str, exc: BaseException) -> dict[str, Any]:
     return evidence
 
 
-def authenticated_read(studio_reader: StudioReader, stage: str, operation: Any) -> Any:
+def authenticated_studio_call(studio_client: StudioReader, stage: str, operation: Any) -> Any:
     refresh_count = 0
     while True:
         try:
@@ -406,7 +413,7 @@ def authenticated_read(studio_reader: StudioReader, stage: str, operation: Any) 
             is_auth_failure = bool(getattr(exc, "auth_failure", False)) or http_status in (401, 403)
             if not is_auth_failure:
                 raise
-            refresh = getattr(studio_reader, "refresh_authentication", None)
+            refresh = getattr(studio_client, "refresh_authentication", None)
             if not callable(refresh) or refresh_count >= MAX_AUTH_REFRESHES:
                 raise GlobalAuthenticationError(stage, http_status) from exc
             refresh_count += 1
@@ -425,7 +432,7 @@ def gallery_checks(
     total_count: int | None = None
     file_failure: dict[str, Any] | None = None
     try:
-        payload = authenticated_read(
+        payload = authenticated_studio_call(
             studio_reader,
             "get_files",
             lambda: studio_reader.get_files(gallery_locator),
@@ -462,7 +469,7 @@ def gallery_checks(
 
     invalid_time_config = False
     try:
-        config_payload = authenticated_read(
+        config_payload = authenticated_studio_call(
             studio_reader,
             "get_play_config",
             lambda: studio_reader.get_play_config(gallery_locator),
@@ -547,7 +554,7 @@ def gallery_checks(
     )
 
     try:
-        audio_payload = authenticated_read(
+        audio_payload = authenticated_studio_call(
             studio_reader,
             "get_audios",
             lambda: studio_reader.get_audios(gallery_locator),
@@ -668,6 +675,27 @@ def saved_subtitle_check(
     )
 
 
+def remove_supported_blockquote_prefixes(subtitle: str) -> tuple[str, int]:
+    """Remove only the raw and &gt; spellings already recognized by NLMCA-010."""
+    updated_lines: list[str] = []
+    marker_count_total = 0
+    lines = subtitle.split("\n")
+    for line in lines:
+        decoded_match = BLOCKQUOTE_PREFIX_RE.match(html.unescape(line))
+        raw_match = RAW_BLOCKQUOTE_PREFIX_RE.match(line)
+        if (
+            decoded_match is None
+            or raw_match is None
+            or html.unescape(raw_match.group(0)) != decoded_match.group(0)
+        ):
+            updated_lines.append(line)
+            continue
+        marker_count = decoded_match.group(0).count(">")
+        updated_lines.append(line[raw_match.end():])
+        marker_count_total += marker_count
+    return "\n".join(updated_lines), marker_count_total
+
+
 def subtitle_page_number(item: dict[str, Any], index: int) -> int:
     page = item.get("page")
     return page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else index
@@ -746,8 +774,8 @@ def subtitle_heading_order_check(
     )
 
 
-def unescaped_bold_candidate_count(markdown: str) -> int:
-    candidate_count = 0
+def unescaped_bold_runs(markdown: str) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
     index = 0
     while index < len(markdown):
         if markdown[index] == "\\":
@@ -777,11 +805,15 @@ def unescaped_bold_candidate_count(markdown: str) -> int:
             run_end = index + 2
             while run_end < len(markdown) and markdown[run_end] == "*":
                 run_end += 1
-            candidate_count += (run_end - index) // 2
+            runs.append((index, run_end))
             index = run_end
             continue
         index += 1
-    return candidate_count
+    return runs
+
+
+def unescaped_bold_candidate_count(markdown: str) -> int:
+    return sum((end - start) // 2 for start, end in unescaped_bold_runs(markdown))
 
 
 def markdown_bold_delimiter_counts(markdown: str) -> tuple[int, int]:
@@ -796,6 +828,47 @@ def markdown_bold_delimiter_counts(markdown: str) -> tuple[int, int]:
             for child in token.children or []
         )
     return candidate_count, recognized_count
+
+
+def normalize_unrecognized_bold_spacing(markdown: str) -> tuple[str | None, str]:
+    candidate_count, recognized_count = markdown_bold_delimiter_counts(markdown)
+    if candidate_count == recognized_count:
+        return markdown, "already_recognized"
+
+    runs = unescaped_bold_runs(markdown)
+    if (
+        sum((end - start) // 2 for start, end in runs) != candidate_count
+        or any(end - start != 2 for start, end in runs)
+    ):
+        return None, "ambiguous_bold_span"
+    if len(runs) == 1:
+        return None, "unpaired_delimiter"
+    if len(runs) != 2 or candidate_count != 2:
+        return None, "ambiguous_bold_span"
+
+    updated = markdown
+    edits: list[tuple[int, int, str]] = []
+    for opening, closing in zip(runs[::2], runs[1::2]):
+        open_end = opening[1]
+        close_start = closing[0]
+        if "\n" in markdown[open_end:close_start]:
+            return None, "ambiguous_bold_span"
+        contents = markdown[open_end:close_start]
+        normalized_contents = contents.lstrip(" \t").rstrip(" \t")
+        if not normalized_contents:
+            return None, "ambiguous_bold_span"
+        if normalized_contents != contents:
+            edits.append((open_end, close_start, normalized_contents))
+
+    if not edits:
+        return None, "spacing_not_repairable"
+    for start, end, replacement in reversed(edits):
+        updated = updated[:start] + replacement + updated[end:]
+
+    repaired_candidates, repaired_delimiters = markdown_bold_delimiter_counts(updated)
+    if repaired_candidates != repaired_delimiters:
+        return None, "normalization_unverified"
+    return updated, "repaired"
 
 
 def subtitle_bold_check(
@@ -1119,7 +1192,7 @@ def audit_course(
     snapshot_path = output_dir / "course-structure.json"
     snapshot_path.unlink(missing_ok=True)
     try:
-        course_tree = authenticated_read(
+        course_tree = authenticated_studio_call(
             studio_reader,
             "course_structure",
             lambda: studio_reader.get_course_structure(course_id),
@@ -1162,7 +1235,7 @@ def audit_course(
     publication_tree = None
     publication_read_failure = None
     try:
-        publication_tree = authenticated_read(
+        publication_tree = authenticated_studio_call(
             studio_reader,
             "course_publication_structure",
             lambda: studio_reader.get_course_publication_structure(course_id),

@@ -8,13 +8,14 @@ from urllib.parse import urlparse
 import requests
 
 from .errors import AuditAuthenticationError, AuditError, StudioReadError
-from .inputs import derive_courses_base
+from .inputs import SAFE_BLOCK_LOCATOR_PATTERN, VERTICAL_LOCATOR_PATTERN, derive_courses_base
 
 
 REQUEST_TIMEOUT = 60
 
 
 GALLERY_READ_HANDLERS = {"get_files", "get_play_config", "get_audios"}
+GALLERY_WRITE_HANDLERS = {"update_play_config"}
 
 
 AUTH_ERROR_PHRASES = (
@@ -42,8 +43,8 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-class StudioApiReader:
-    """Authenticated reader with an explicit allowlist of Studio read operations."""
+class StudioApiClient:
+    """Authenticated Studio client with a narrow allowlist of audit operations."""
 
     def __init__(
         self,
@@ -240,6 +241,33 @@ class StudioApiReader:
             raise StudioReadError(handler, f"Studio {handler} read failed.") from exc
         return self._json_response(response, handler)
 
+    def _post_gallery_write(self, gallery_locator: str, handler: str, body: dict[str, Any]) -> dict[str, Any]:
+        if handler not in GALLERY_WRITE_HANDLERS:
+            raise AuditError("Only the approved Gallery write handlers are available.")
+        if not SAFE_BLOCK_LOCATOR_PATTERN.fullmatch(gallery_locator):
+            raise AuditError("The Gallery locator is invalid.")
+        path = f"/xblock/{gallery_locator}/handler/{handler}"
+        try:
+            response = self.session.post(
+                f"{self.studio_base}{path}",
+                json=body,
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": self._csrf(),
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Origin": self.studio_base,
+                    "Referer": f"{self.studio_base}/container/{gallery_locator}",
+                },
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+            )
+        except StudioReadError:
+            raise
+        except requests.RequestException as exc:
+            raise StudioReadError(handler, f"Studio {handler} request failed.") from exc
+        return self._json_response(response, handler)
+
     def get_files(self, gallery_locator: str) -> Any:
         return self._post_gallery_read(gallery_locator, "get_files", {"current_page": 0, "page_size": 100})
 
@@ -248,3 +276,36 @@ class StudioApiReader:
 
     def get_audios(self, gallery_locator: str) -> Any:
         return self._post_gallery_read(gallery_locator, "get_audios", {})
+
+    def update_play_config(self, gallery_locator: str, play_config: dict[str, Any]) -> Any:
+        return self._post_gallery_write(
+            gallery_locator,
+            "update_play_config",
+            {"play_config": play_config},
+        )
+
+    def publish_vertical(self, vertical_locator: str) -> Any:
+        if not VERTICAL_LOCATOR_PATTERN.fullmatch(vertical_locator):
+            raise AuditError("The vertical locator is invalid.")
+        path = f"/xblock/{vertical_locator}"
+        try:
+            response = self.session.post(
+                f"{self.studio_base}{path}",
+                json={"publish": "make_public"},
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": self._csrf(),
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-HTTP-Method-Override": "PATCH",
+                    "Origin": self.studio_base,
+                    "Referer": f"{self.studio_base}/container/{vertical_locator}",
+                },
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+            )
+        except StudioReadError:
+            raise
+        except requests.RequestException as exc:
+            raise StudioReadError("publish_vertical", "Studio vertical publish request failed.") from exc
+        return self._json_response(response, "publish_vertical")
